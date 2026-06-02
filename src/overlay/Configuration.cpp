@@ -326,14 +326,23 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	refToTarget["pitch"].set<double>(refToTragetRoation(2));
 	profile["relative_pos_calibrated"].set<bool>(ctx.relativePosCalibrated);
 	profile["slam_fix_r_locked"].set<bool>(ctx.slamFixRLocked);
-	profile["slam_fix_drift_pos_sq"].set<double>(ctx.slamFixDriftPosSq);
-	profile["slam_fix_drift_rot_sq"].set<double>(ctx.slamFixDriftRotSq);
-	profile["slam_fix_time_skew"].set<double>(ctx.slamFixTimeSkew);
+	// picojson::set<T> binds its argument to const T& and is only specialized for
+	// the const-ref form, so pass lvalues (rvalue casts hit an undefined T&&).
+	double slamDriftPosSq = ctx.slamFixDriftPosSq;
+	double slamDriftRotSq = ctx.slamFixDriftRotSq;
+	double slamTimeSkew   = ctx.slamFixTimeSkew;
+	double slamLearnGain  = (double)ctx.slamFixTuneLearnGain;
+	double slamMinSamples = (double)ctx.slamFixTuneMinSamples;
+	double slamMadFactor  = (double)ctx.slamFixTuneMadFactor;
+	double slamWalkDur    = (double)ctx.slamFixWalkDurationS;
+	profile["slam_fix_drift_pos_sq"].set<double>(slamDriftPosSq);
+	profile["slam_fix_drift_rot_sq"].set<double>(slamDriftRotSq);
+	profile["slam_fix_time_skew"].set<double>(slamTimeSkew);
 	profile["slam_fix_autotune"].set<bool>(ctx.slamFixAutoTune);
-	profile["slam_fix_tune_learn_gain"].set<double>((double)ctx.slamFixTuneLearnGain);
-	profile["slam_fix_tune_min_samples"].set<double>((double)ctx.slamFixTuneMinSamples);
-	profile["slam_fix_tune_mad_factor"].set<double>((double)ctx.slamFixTuneMadFactor);
-	profile["slam_fix_walk_duration_s"].set<double>((double)ctx.slamFixWalkDurationS);
+	profile["slam_fix_tune_learn_gain"].set<double>(slamLearnGain);
+	profile["slam_fix_tune_min_samples"].set<double>(slamMinSamples);
+	profile["slam_fix_tune_mad_factor"].set<double>(slamMadFactor);
+	profile["slam_fix_walk_duration_s"].set<double>(slamWalkDur);
 	profile["lock_relative_position"].set<bool>(ctx.lockRelativePosition);
 	profile["relative_transform"].set<picojson::object>(refToTarget);
 
