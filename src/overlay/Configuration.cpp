@@ -192,6 +192,33 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["slam_fix_r_locked"].is<bool>()) {
 		ctx.slamFixRLocked = obj["slam_fix_r_locked"].get<bool>();
 	}
+	// SLAM-Fix self-tuning drift rate (learned + auto-tuner controls).
+	if (obj["slam_fix_drift_pos_sq"].is<double>()) {
+		ctx.slamFixDriftPosSq = obj["slam_fix_drift_pos_sq"].get<double>();
+		ctx.slamFixDriftSeeded = true;
+	}
+	if (obj["slam_fix_drift_rot_sq"].is<double>()) {
+		ctx.slamFixDriftRotSq = obj["slam_fix_drift_rot_sq"].get<double>();
+		ctx.slamFixDriftSeeded = true;
+	}
+	if (obj["slam_fix_time_skew"].is<double>()) {
+		ctx.slamFixTimeSkew = obj["slam_fix_time_skew"].get<double>();
+	}
+	if (obj["slam_fix_autotune"].is<bool>()) {
+		ctx.slamFixAutoTune = obj["slam_fix_autotune"].get<bool>();
+	}
+	if (obj["slam_fix_tune_learn_gain"].is<double>()) {
+		ctx.slamFixTuneLearnGain = (float)obj["slam_fix_tune_learn_gain"].get<double>();
+	}
+	if (obj["slam_fix_tune_min_samples"].is<double>()) {
+		ctx.slamFixTuneMinSamples = (int)obj["slam_fix_tune_min_samples"].get<double>();
+	}
+	if (obj["slam_fix_tune_mad_factor"].is<double>()) {
+		ctx.slamFixTuneMadFactor = (float)obj["slam_fix_tune_mad_factor"].get<double>();
+	}
+	if (obj["slam_fix_walk_duration_s"].is<double>()) {
+		ctx.slamFixWalkDurationS = (float)obj["slam_fix_walk_duration_s"].get<double>();
+	}
 	if (obj["lock_relative_position"].is<bool>()) {
 		ctx.lockRelativePosition = obj["lock_relative_position"].get<bool>();
 	}
@@ -299,6 +326,14 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	refToTarget["pitch"].set<double>(refToTragetRoation(2));
 	profile["relative_pos_calibrated"].set<bool>(ctx.relativePosCalibrated);
 	profile["slam_fix_r_locked"].set<bool>(ctx.slamFixRLocked);
+	profile["slam_fix_drift_pos_sq"].set<double>(ctx.slamFixDriftPosSq);
+	profile["slam_fix_drift_rot_sq"].set<double>(ctx.slamFixDriftRotSq);
+	profile["slam_fix_time_skew"].set<double>(ctx.slamFixTimeSkew);
+	profile["slam_fix_autotune"].set<bool>(ctx.slamFixAutoTune);
+	profile["slam_fix_tune_learn_gain"].set<double>((double)ctx.slamFixTuneLearnGain);
+	profile["slam_fix_tune_min_samples"].set<double>((double)ctx.slamFixTuneMinSamples);
+	profile["slam_fix_tune_mad_factor"].set<double>((double)ctx.slamFixTuneMadFactor);
+	profile["slam_fix_walk_duration_s"].set<double>((double)ctx.slamFixWalkDurationS);
 	profile["lock_relative_position"].set<bool>(ctx.lockRelativePosition);
 	profile["relative_transform"].set<picojson::object>(refToTarget);
 

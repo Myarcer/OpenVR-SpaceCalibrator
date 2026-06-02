@@ -8,6 +8,7 @@
 #include <deque>
 
 #include "Protocol.h"
+#include "DriftRateTuner.h"
 
 enum class CalibrationState
 {
@@ -80,6 +81,28 @@ struct CalibrationContext
 	// Runs every N ticks regardless of velocity — axis variance + RMS
 	// validation gate quality. Translation-only fallback when variance is low.
 	int slamFixKabschRecenterTicks = 0;
+
+	// --- SLAM-Fix self-tuning drift rate ---
+	// Learned EKF process-noise (variances). sigma_lin_pos_sq == (drift_per_meter)^2,
+	// sigma_ang_rot_sq == (drift_per_rad)^2. Persisted; pushed into the filter at
+	// calibration start via CalibrationCalc::SlamFixSetDriftRates. Defaults match
+	// the filter's built-in (5cm/m, ~0.01 rad/rad).
+	double slamFixDriftPosSq = 2.5e-3;
+	double slamFixDriftRotSq = 1e-4;
+	double slamFixTimeSkew   = 0.020;   // assumed streaming latency (s)
+	bool   slamFixAutoTune   = false;   // continuous refinement (off until seeded)
+	bool   slamFixDriftSeeded = false;  // a manual walk (or load) has set a real rate
+	// Auto-tuner controls (exposed in Settings, persisted).
+	float  slamFixTuneLearnGain = 0.25f;
+	int    slamFixTuneMinSamples = 300;
+	float  slamFixTuneMadFactor = 5.0f;
+	float  slamFixWalkDurationS = 15.0f;
+	// Manual-walk runtime state. The walk runs inside the normal Continuous
+	// state (no separate CalibrationState) - this flag selects aggressive
+	// collection + snap-on-completion instead of slow auto refinement.
+	bool   slamFixWalkActive = false;
+	double slamFixWalkStartTime = 0.0;
+	DriftRateTuner slamFixTuner;
 
 	float xprev, yprev, zprev;
 
@@ -301,6 +324,8 @@ void CalibrationTick(double time);
 void StartCalibration();
 void StartContinuousCalibration();
 void EndContinuousCalibration();
+void StartSlamDriftCalibration();   // begin the timed manual drift-rate walk
+void SlamFixApplyTuning();          // push CalCtx drift rates / time skew into the live filter
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 

@@ -124,7 +124,17 @@ public:
 		double lin_speed_r_mps, double ang_speed_r_radps,
 		double lever_arm_m,
 		double *innovation_pos_m, double *innovation_rot_rad,
-		double *mahalanobis);
+		double *mahalanobis,
+		double *nis_pos = nullptr, double *nis_rot = nullptr);
+
+	// Self-tuning accessors for the EKF process-noise drift rates.
+	// sigma_lin_pos_sq == (drift_per_meter)^2, sigma_ang_rot_sq == (drift_per_rad)^2.
+	void   SlamFixSetDriftRates(double sigma_lin_pos_sq, double sigma_ang_rot_sq);
+	double SlamFixDriftRatePosSq() const;
+	double SlamFixDriftRateRotSq() const;
+	// Assumed reference<->target time skew (streaming latency); R-inflation gain.
+	void   SlamFixSetTimeSkew(double dt_skew_s);
+	double SlamFixTimeSkew() const;
 
 	// Force-reset the EKF (e.g. on user request or after calibration mode change).
 	void SlamFixDriftReset();

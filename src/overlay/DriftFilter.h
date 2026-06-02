@@ -60,7 +60,9 @@ public:
                 double lever_arm_m,
                 double *out_innov_pos_m,
                 double *out_innov_rot_rad,
-                double *out_mahalanobis);
+                double *out_mahalanobis,
+                double *out_nis_pos = nullptr,
+                double *out_nis_rot = nullptr);
 
     // Current drift transform estimate.
     const Sophus::SE3d& Transform() const { return T_; }

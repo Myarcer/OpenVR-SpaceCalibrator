@@ -10,6 +10,8 @@
 #include <vector>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
+#include <cmath>
 
 #include <Eigen/Dense>
 #include <GLFW/glfw3.h>
@@ -403,7 +405,18 @@ void StartContinuousCalibration() {
 		CalCtx.slamFixVelAngEma = 0.0;
 		CalCtx.slamFixRMountRefineTicks = 0;
 		CalCtx.slamFixKabschRecenterTicks = 0;
+		CalCtx.slamFixWalkActive = false;
 		calibration.SlamFixDriftReset();
+
+		// Push the learned (or default) drift rates + time skew into the filter,
+		// and configure the self-tuner from the persisted controls.
+		calibration.SlamFixSetDriftRates(CalCtx.slamFixDriftPosSq, CalCtx.slamFixDriftRotSq);
+		calibration.SlamFixSetTimeSkew(CalCtx.slamFixTimeSkew);
+		CalCtx.slamFixTuner.Reset();
+		CalCtx.slamFixTuner.params.learn_gain  = CalCtx.slamFixTuneLearnGain;
+		CalCtx.slamFixTuner.params.min_samples = CalCtx.slamFixTuneMinSamples;
+		CalCtx.slamFixTuner.params.mad_factor  = CalCtx.slamFixTuneMadFactor;
+
 		// SLAM-Fix params are applied at-read-time via Effective*() accessors.
 		// User profile fields are NOT mutated - switching back to FAST/SLOW/etc
 		// restores the user's saved values.
@@ -430,9 +443,32 @@ void StartContinuousCalibration() {
 
 void EndContinuousCalibration() {
 	CalCtx.state = CalibrationState::None;
+	CalCtx.slamFixWalkActive = false;
 	CalCtx.relativePosCalibrated = false;
 	SaveProfile(CalCtx);
 	Metrics::WriteLogAnnotation("EndContinuousCalibration");
+}
+
+void SlamFixApplyTuning() {
+	calibration.SlamFixSetDriftRates(CalCtx.slamFixDriftPosSq, CalCtx.slamFixDriftRotSq);
+	calibration.SlamFixSetTimeSkew(CalCtx.slamFixTimeSkew);
+	CalCtx.slamFixTuner.params.learn_gain  = CalCtx.slamFixTuneLearnGain;
+	CalCtx.slamFixTuner.params.min_samples = CalCtx.slamFixTuneMinSamples;
+	CalCtx.slamFixTuner.params.mad_factor  = CalCtx.slamFixTuneMadFactor;
+}
+
+void StartSlamDriftCalibration() {
+	// Only meaningful while SLAM-Fix tracking is live.
+	if (!CalCtx.IsSlamFix() || CalCtx.state != CalibrationState::Continuous) {
+		CalCtx.Log("Drift calibration: start SLAM-Fix continuous calibration first\n");
+		return;
+	}
+	CalCtx.slamFixTuner.Reset();
+	CalCtx.slamFixWalkStartTime = 0.0;  // initialized on first tick (like slamFixLastTickTime)
+	CalCtx.slamFixWalkActive = true;
+	CalCtx.ClearLogOnMessage();
+	CalCtx.Log("Drift calibration: walk straight back-and-forth across your room.\n");
+	Metrics::WriteLogAnnotation("StartSlamDriftCalibration");
 }
 
 static const char* SpeedName(CalibrationContext::Speed s) {
@@ -755,11 +791,13 @@ void CalibrationTick(double time)
 		if (lever_arm_m > 0.30) lever_arm_m = 0.30;
 
 		double innov_pos = 0.0, innov_rot = 0.0, mahal = 0.0;
+		double nis_pos = 0.0, nis_rot = 0.0;
 		bool ok_lp = calibration.SlamFixDriftStep(
 			dt, user_lin_speed_q, user_ang_speed_q,
 			user_lin_speed_r, user_ang_speed_r,
 			lever_arm_m,
-			&innov_pos, &innov_rot, &mahal);
+			&innov_pos, &innov_rot, &mahal,
+			&nis_pos, &nis_rot);
 
 		// Phase classification for log:
 		//   0 = bootstrap (filter not yet initialized)
@@ -767,6 +805,62 @@ void CalibrationTick(double time)
 		//   2 = reset (sustained Mahalanobis trip just snapped state to T_meas)
 		int slamfix_phase = 1;
 		if (calibration.SlamFixConsumeResetEvent()) slamfix_phase = 2;
+
+		// --- Self-tuning drift rate ---
+		// Feed per-channel NIS into the tuner. Only steady tracking ticks while
+		// actually moving carry drift information; bootstrap/reset ticks and
+		// stationary ticks are skipped (median + MAD inside the tuner reject the
+		// rest). The walk uses a looser motion gate to gather samples fast.
+		{
+			const bool tracking = (slamfix_phase == 1) && ok_lp && calibration.isValid();
+			const bool lin_moving = user_lin_speed_r > 0.10;  // m/s, clearly walking
+			const bool ang_moving = user_ang_speed_r > 0.15;  // rad/s, clearly turning
+			if (tracking) {
+				ctx.slamFixTuner.PushPos(nis_pos, lin_moving);
+				ctx.slamFixTuner.PushRot(nis_rot, ang_moving);
+			}
+		}
+
+		if (ctx.slamFixWalkActive) {
+			// Timed manual seed walk. Snap the drift rates to the collected
+			// median once the duration elapses, persist, and resume normal mode.
+			if (ctx.slamFixWalkStartTime <= 0.0) ctx.slamFixWalkStartTime = time;
+			double elapsed = time - ctx.slamFixWalkStartTime;
+			int target = (int)(ctx.slamFixWalkDurationS + 0.5);
+			CalCtx.Progress(std::min((int)elapsed, target), target);
+			if (elapsed >= ctx.slamFixWalkDurationS) {
+				double posSq = ctx.slamFixDriftPosSq;
+				double rotSq = ctx.slamFixDriftRotSq;
+				bool gotPos = ctx.slamFixTuner.SnapPos(posSq);
+				bool gotRot = ctx.slamFixTuner.SnapRot(rotSq);
+				if (gotPos) ctx.slamFixDriftPosSq = posSq;
+				if (gotRot) ctx.slamFixDriftRotSq = rotSq;
+				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
+				ctx.slamFixWalkActive = false;
+				ctx.slamFixDriftSeeded = ctx.slamFixDriftSeeded || gotPos || gotRot;
+				char dbuf[160];
+				snprintf(dbuf, sizeof dbuf,
+					"Drift calibration done: %.1f cm/m, %.2f deg/rad%s\n",
+					std::sqrt(ctx.slamFixDriftPosSq) * 100.0,
+					std::sqrt(ctx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
+					(gotPos || gotRot) ? "" : " (insufficient motion - try again)");
+				CalCtx.Log(dbuf);
+				SaveProfile(ctx);
+			}
+		} else if (ctx.slamFixAutoTune) {
+			// Continuous slow refinement. Each call fires only once a window of
+			// samples is collected (min_samples), then nudges the rate slightly.
+			double posSq = ctx.slamFixDriftPosSq;
+			double rotSq = ctx.slamFixDriftRotSq;
+			bool changed = false;
+			if (ctx.slamFixTuner.MaybeApplyPos(posSq)) { ctx.slamFixDriftPosSq = posSq; changed = true; }
+			if (ctx.slamFixTuner.MaybeApplyRot(rotSq)) { ctx.slamFixDriftRotSq = rotSq; changed = true; }
+			if (changed) {
+				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
+				ctx.slamFixDriftSeeded = true;
+				SaveProfile(ctx);
+			}
+		}
 
 		if (ok_lp && calibration.isValid()) {
 			ctx.calibratedRotation = calibration.EulerRotation();

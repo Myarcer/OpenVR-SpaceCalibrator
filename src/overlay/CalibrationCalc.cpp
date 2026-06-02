@@ -133,6 +133,28 @@ void CalibrationCalc::SlamFixDriftReset() {
 	if (m_driftFilter) m_driftFilter->Reset();
 }
 
+void CalibrationCalc::SlamFixSetDriftRates(double sigma_lin_pos_sq, double sigma_ang_rot_sq) {
+	if (!m_driftFilter) return;
+	m_driftFilter->params.sigma_lin_pos_sq = sigma_lin_pos_sq;
+	m_driftFilter->params.sigma_ang_rot_sq = sigma_ang_rot_sq;
+}
+
+double CalibrationCalc::SlamFixDriftRatePosSq() const {
+	return m_driftFilter ? m_driftFilter->params.sigma_lin_pos_sq : 0.0;
+}
+
+double CalibrationCalc::SlamFixDriftRateRotSq() const {
+	return m_driftFilter ? m_driftFilter->params.sigma_ang_rot_sq : 0.0;
+}
+
+void CalibrationCalc::SlamFixSetTimeSkew(double dt_skew_s) {
+	if (m_driftFilter) m_driftFilter->params.dt_skew_s = dt_skew_s;
+}
+
+double CalibrationCalc::SlamFixTimeSkew() const {
+	return m_driftFilter ? m_driftFilter->params.dt_skew_s : 0.0;
+}
+
 bool CalibrationCalc::SlamFixConsumeResetEvent() {
 	return m_driftFilter ? m_driftFilter->ConsumeResetEvent() : false;
 }
@@ -668,10 +690,13 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 	double lin_speed_r_mps, double ang_speed_r_radps,
 	double lever_arm_m,
 	double *innovation_pos_m, double *innovation_rot_rad,
-	double *mahalanobis) {
+	double *mahalanobis,
+	double *nis_pos, double *nis_rot) {
 	if (innovation_pos_m) *innovation_pos_m = 0.0;
 	if (innovation_rot_rad) *innovation_rot_rad = 0.0;
 	if (mahalanobis) *mahalanobis = 0.0;
+	if (nis_pos) *nis_pos = 0.0;
+	if (nis_rot) *nis_rot = 0.0;
 
 	if (!m_relativePosCalibrated) return false;
 	if (m_samples.empty()) return false;
@@ -704,7 +729,7 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 
 	m_driftFilter->Predict(dt, lin_speed_q_mps, ang_speed_q_radps);
 	m_driftFilter->Update(T_meas, lin_speed_r_mps, ang_speed_r_radps, lever_arm_m,
-		innovation_pos_m, innovation_rot_rad, mahalanobis);
+		innovation_pos_m, innovation_rot_rad, mahalanobis, nis_pos, nis_rot);
 
 	// Write posterior into m_estimatedTransformation.
 	const Sophus::SE3d& T_post = m_driftFilter->Transform();

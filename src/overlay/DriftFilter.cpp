@@ -116,7 +116,12 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
                          double lever_arm_m,
                          double *out_innov_pos_m,
                          double *out_innov_rot_rad,
-                         double *out_mahalanobis) {
+                         double *out_mahalanobis,
+                         double *out_nis_pos,
+                         double *out_nis_rot) {
+    if (out_nis_pos) *out_nis_pos = 0.0;
+    if (out_nis_rot) *out_nis_rot = 0.0;
+
     // Bootstrap: snap on first measurement.
     if (!initialized_) {
         T_ = T_meas;
@@ -166,6 +171,19 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
     double mahal = std::sqrt(std::max(0.0, mahal_sq));
     last_mahal_ = mahal;
     if (out_mahalanobis) *out_mahalanobis = mahal;
+
+    // Per-channel NIS (normalized innovation squared) for the self-tuner.
+    // Uses the marginal innovation covariance of each channel (top-left /
+    // bottom-right 3x3 of S), which is the correct per-channel consistency
+    // statistic. Both are chi-square with mean 3 when the noise model matches.
+    if (out_nis_pos) {
+        Eigen::Matrix3d S_pos = S.block<3, 3>(0, 0);
+        *out_nis_pos = (y_pos.transpose() * S_pos.inverse() * y_pos)(0, 0);
+    }
+    if (out_nis_rot) {
+        Eigen::Matrix3d S_rot = S.block<3, 3>(3, 3);
+        *out_nis_rot = (y_rot.transpose() * S_rot.inverse() * y_rot)(0, 0);
+    }
 
     // Reset trigger: sustained large innovation -> snap to measurement.
     if (mahal > params.reset_mahal_thresh) {

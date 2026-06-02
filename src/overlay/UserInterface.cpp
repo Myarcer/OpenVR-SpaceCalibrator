@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <imgui/imgui.h>
 #include "imgui_extensions.h"
 
@@ -368,6 +369,86 @@ void CCal_DrawSettings() {
 		ImGui::EndGroupPanel();
 	}
 
+	// Section: SLAM-Fix auto-tune (only relevant for the SLAM-Fix preset)
+	if (CalCtx.IsSlamFix()) {
+		ImGui::BeginGroupPanel("SLAM-Fix auto-tune", panel_size);
+
+		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+		ImGui::TextWrapped(
+			"The drift rate is learned per-headset from the EKF's innovation "
+			"consistency. Seed it with 'Calibrate drift' on the Status tab, then "
+			"enable 'Auto-tune drift' to refine it slowly during normal use.");
+		ImGui::PopStyleColor();
+
+		bool changed = false;
+
+		ImGui::Text("Learning rate");
+		ImGui::SameLine();
+		ImGui::PushID("slam_learn_gain");
+		changed |= ImGui::SliderFloat("##slam_learn_gain", &CalCtx.slamFixTuneLearnGain, 0.05f, 0.5f, "%.2f");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("How aggressively auto-tune adapts per window. Lower = slower, steadier.");
+		ImGui::PopID();
+
+		ImGui::Text("Window samples");
+		ImGui::SameLine();
+		ImGui::PushID("slam_min_samples");
+		changed |= ImGui::SliderInt("##slam_min_samples", &CalCtx.slamFixTuneMinSamples, 100, 1000);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Moving-tick samples collected before each auto-tune step.");
+		ImGui::PopID();
+
+		ImGui::Text("Outlier reject (MAD x)");
+		ImGui::SameLine();
+		ImGui::PushID("slam_mad");
+		changed |= ImGui::SliderFloat("##slam_mad", &CalCtx.slamFixTuneMadFactor, 2.0f, 10.0f, "%.1f");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Samples beyond this many MADs from the median are discarded.");
+		ImGui::PopID();
+
+		ImGui::Text("Walk duration (s)");
+		ImGui::SameLine();
+		ImGui::PushID("slam_walk_dur");
+		ImGui::SliderFloat("##slam_walk_dur", &CalCtx.slamFixWalkDurationS, 10.0f, 20.0f, "%.0f");
+		ImGui::PopID();
+
+		// Advanced: manual override of the learned rates + streaming latency.
+		ImGui::BeginGroupPanel("Advanced (manual override)", ImVec2(panel_size.x - 11 * 2, 0));
+		float driftPos = (float)(std::sqrt(CalCtx.slamFixDriftPosSq) * 100.0);   // cm/m
+		float driftRot = (float)(std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI); // deg/rad
+		float skewMs   = (float)(CalCtx.slamFixTimeSkew * 1000.0);
+
+		ImGui::Text("Trans drift (cm/m)");
+		ImGui::SameLine();
+		ImGui::PushID("slam_drift_pos");
+		if (ImGui::SliderFloat("##slam_drift_pos", &driftPos, 1.0f, 25.0f, "%.1f")) {
+			double s = driftPos / 100.0; CalCtx.slamFixDriftPosSq = s * s; changed = true;
+		}
+		ImGui::PopID();
+
+		ImGui::Text("Rot drift (deg/rad)");
+		ImGui::SameLine();
+		ImGui::PushID("slam_drift_rot");
+		if (ImGui::SliderFloat("##slam_drift_rot", &driftRot, 0.1f, 5.0f, "%.2f")) {
+			double s = driftRot * EIGEN_PI / 180.0; CalCtx.slamFixDriftRotSq = s * s; changed = true;
+		}
+		ImGui::PopID();
+
+		ImGui::Text("Time skew (ms)");
+		ImGui::SameLine();
+		ImGui::PushID("slam_skew");
+		if (ImGui::SliderFloat("##slam_skew", &skewMs, 0.0f, 60.0f, "%.0f")) {
+			CalCtx.slamFixTimeSkew = skewMs / 1000.0; changed = true;
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Assumed reference<->SLAM latency (VirtualDesktop/ALVR streaming).\nInflates measurement noise during motion.");
+		ImGui::PopID();
+		ImGui::EndGroupPanel();
+
+		if (changed) {
+			SlamFixApplyTuning();
+			SaveProfile(CalCtx);
+		}
+
+		ImGui::EndGroupPanel();
+	}
+
 	ImGui::NewLine();
 	ImGui::Indent();
 	if (ImGui::Button("Reset settings")) {
@@ -540,6 +621,37 @@ void CCal_BasicInfo() {
 		}
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Clear cached rigid mount offset and re-run Kabsch bootstrap.\nUse this if you physically re-mounted the lighthouse tracker.");
+
+		// --- Drift-rate self-tuning ---
+		ImGui::Text("Drift rate: %.1f cm/m,  %.2f deg/rad%s",
+			std::sqrt(CalCtx.slamFixDriftPosSq) * 100.0,
+			std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
+			CalCtx.slamFixDriftSeeded ? "" : "  (default - not yet calibrated)");
+
+		const bool walking = CalCtx.slamFixWalkActive;
+		ImGui::BeginDisabled(walking || CalCtx.state != CalibrationState::Continuous);
+		if (walking) {
+			ImGui::Button("Calibrating... walk back-and-forth");
+		} else if (ImGui::Button("Calibrate drift (walk ~15s)")) {
+			StartSlamDriftCalibration();
+		}
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Measure this headset's drift rate. When you click, walk\n"
+				"straight back-and-forth across your room for ~%.0fs. Straight\n"
+				"lines give the cleanest signal; head turns sample rotation drift.",
+				CalCtx.slamFixWalkDurationS);
+
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!CalCtx.slamFixDriftSeeded);
+		if (ImGui::Checkbox("Auto-tune drift", &CalCtx.slamFixAutoTune)) {
+			SaveProfile(CalCtx);
+		}
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(CalCtx.slamFixDriftSeeded
+				? "Continuously refine the drift rate from the EKF's own innovation\nconsistency while you use VR. Slow and outlier-robust."
+				: "Run 'Calibrate drift' once to seed a per-headset rate first.");
 	}
 
 	// Status field...
