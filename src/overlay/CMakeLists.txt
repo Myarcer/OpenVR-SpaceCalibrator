@@ -69,6 +69,7 @@ target_include_directories(SpaceCalibratorOverlay
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/openvr/headers
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/imgui/backends
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/Eigen
+    PUBLIC ${CMAKE_SOURCE_DIR}/third-party/Sophus
 )
 
 target_link_libraries(SpaceCalibratorOverlay
@@ -84,6 +85,8 @@ target_compile_definitions(SpaceCalibratorOverlay
     PRIVATE NOMINMAX
     PRIVATE UNICODE
     PRIVATE IMGUI_DEFINE_MATH_OPERATORS
+    PRIVATE SOPHUS_USE_BASIC_LOGGING
+    PRIVATE SOPHUS_DISABLE_ENSURES
 )
 
 # Object files are too big with spacecal sooooo
@@ -139,6 +142,34 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy
     ${CMAKE_SOURCE_DIR}/lib/openvr/bin/win64/openvr_api.dll
     ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>/openvr_api.dll
+)
+
+# Auto-deploy to install/ (registered as SteamVR external driver via openvrpaths.vrpath)
+# Builds now directly update the running SteamVR installation - no manual copy needed.
+add_custom_command(
+    TARGET SpaceCalibratorOverlay POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:SpaceCalibratorOverlay>
+        ${CMAKE_SOURCE_DIR}/install/SpaceCalibrator.exe
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/lib/openvr/bin/win64/openvr_api.dll
+        ${CMAKE_SOURCE_DIR}/install/openvr_api.dll
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/overlay/manifest.vrmanifest
+        ${CMAKE_SOURCE_DIR}/install/manifest.vrmanifest
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/overlay/icon.png
+        ${CMAKE_SOURCE_DIR}/install/icon.png
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/overlay/taskbar_icon.png
+        ${CMAKE_SOURCE_DIR}/install/taskbar_icon.png
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/LICENSE
+        ${CMAKE_SOURCE_DIR}/install/LICENSE
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/NOTICE
+        ${CMAKE_SOURCE_DIR}/install/README
+    COMMENT "Deploying overlay to install/ (SteamVR external driver path)"
 )
 
 # Set as startup project

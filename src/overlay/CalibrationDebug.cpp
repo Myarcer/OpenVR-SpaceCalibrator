@@ -313,9 +313,62 @@ namespace {
 		}
 	}
 
+	void G_SlamFix_Innovation() {
+		if (ImPlot::BeginPlot("##SlamFixInnovation")) {
+			ImPlot::SetupAxes(nullptr, "mm / deg", 0, ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit);
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 50, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			PlotLineG("Pos (mm)", Metrics::slamfix_innov_pos_mm);
+			PlotLineG("Rot (deg)", Metrics::slamfix_innov_rot_deg);
+
+			ImPlot::EndPlot();
+		}
+	}
+
+	void G_SlamFix_Velocity() {
+		if (ImPlot::BeginPlot("##SlamFixVelocity")) {
+			ImPlot::SetupAxes(nullptr, "mm/s | deg/s", 0, ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit);
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 500, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			PlotLineG("Lin (mm/s)", Metrics::slamfix_v_lin_mm_s);
+			PlotLineG("Ang (deg/s)", Metrics::slamfix_v_ang_deg_s);
+
+			ImPlot::EndPlot();
+		}
+	}
+
+	void G_SlamFix_Mahalanobis() {
+		if (ImPlot::BeginPlot("##SlamFixMahal", ImVec2(-1, 0), ImPlotFlags_NoLegend)) {
+			ImPlot::SetupAxes(nullptr, nullptr, 0, ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit);
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 5, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			PlotLineG("Mahalanobis", Metrics::slamfix_mahal);
+
+			// Draw threshold line at 5.0
+			ImPlot::SetNextLineStyle(ImVec4(1, 0, 0, 0.5f), 1.0f);
+			double thresh_x[2] = { -Metrics::TimeSpan, 0 };
+			double thresh_y[2] = { 5.0, 5.0 };
+			ImPlot::PlotLine("##thresh", thresh_x, thresh_y, 2);
+
+			ImPlot::EndPlot();
+		}
+	}
+
 	const struct GraphInfo graphs[] = {
 		{ "Position Error", G_PosOffset_PosError },
 		{ "Axis Variance", G_AxisVariance },
+		{ "SLAM: Innovation", G_SlamFix_Innovation },
+		{ "SLAM: Velocity", G_SlamFix_Velocity },
+		{ "SLAM: Mahalanobis", G_SlamFix_Mahalanobis },
 		{ "Offset: Raw Computed", G_PosOffset_RawComputed },
 		{ "Offset: Current Calibration", G_PosOffset_CurrentCal },
 		{ "Offset: Last Sample", G_PosOffset_LastSample },

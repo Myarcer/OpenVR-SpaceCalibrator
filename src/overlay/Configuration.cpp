@@ -189,6 +189,9 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["relative_pos_calibrated"].is<bool>()) {
 		ctx.relativePosCalibrated = obj["relative_pos_calibrated"].get<bool>();
 	}
+	if (obj["slam_fix_r_locked"].is<bool>()) {
+		ctx.slamFixRLocked = obj["slam_fix_r_locked"].get<bool>();
+	}
 	if (obj["lock_relative_position"].is<bool>()) {
 		ctx.lockRelativePosition = obj["lock_relative_position"].get<bool>();
 	}
@@ -295,6 +298,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	refToTarget["yaw"].set<double>(refToTragetRoation(1));
 	refToTarget["pitch"].set<double>(refToTragetRoation(2));
 	profile["relative_pos_calibrated"].set<bool>(ctx.relativePosCalibrated);
+	profile["slam_fix_r_locked"].set<bool>(ctx.slamFixRLocked);
 	profile["lock_relative_position"].set<bool>(ctx.lockRelativePosition);
 	profile["relative_transform"].set<picojson::object>(refToTarget);
 

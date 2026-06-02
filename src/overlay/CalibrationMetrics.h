@@ -52,8 +52,21 @@ namespace Metrics {
 
 	extern TimeSeries<bool> calibrationApplied;
 
+	// SLAM-Fix per-frame metrics (only written in SLAM-Fix mode)
+	// slamfix_phase: 0=bootstrap, 1=tracking, 2=reset (sustained Mahalanobis trip)
+	extern TimeSeries<int> slamfix_phase;
+	extern TimeSeries<double> slamfix_innov_pos_mm;
+	extern TimeSeries<double> slamfix_innov_rot_deg;
+	extern TimeSeries<double> slamfix_v_lin_mm_s;
+	extern TimeSeries<double> slamfix_v_ang_deg_s;
+	extern TimeSeries<double> slamfix_mahal;
+
 	extern bool enableLogs;
 
 	void WriteLogAnnotation(const char* s);
 	void WriteLogEntry();
+
+	// Returns true exactly once after a new log file is opened, then clears.
+	// Used to re-emit the settings snapshot at the top of every fresh log.
+	bool TakeLogOpenedFlag();
 }

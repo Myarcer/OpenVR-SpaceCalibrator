@@ -20,6 +20,14 @@ namespace Metrics {
 	// true - full calibration, false - static calibration
 	TimeSeries<bool> calibrationApplied;
 
+	// SLAM-Fix per-frame metrics
+	TimeSeries<int> slamfix_phase;
+	TimeSeries<double> slamfix_innov_pos_mm;
+	TimeSeries<double> slamfix_innov_rot_deg;
+	TimeSeries<double> slamfix_v_lin_mm_s;
+	TimeSeries<double> slamfix_v_ang_deg_s;
+	TimeSeries<double> slamfix_mahal;
+
 	// https://stackoverflow.com/a/17827724
 	bool IsBrowsePath(const std::wstring& path)
 	{
@@ -82,6 +90,7 @@ namespace Metrics {
 	static std::ofstream logFile;
 	static bool logFileIsOpen = false;
 	static bool failedToOpenLogFile = false;
+	static bool logJustOpened = false;
 
 	struct CsvField {
 		const char* name;
@@ -117,7 +126,7 @@ namespace Metrics {
 		TS_FIELD(jitterTarget),
 
 		{
-			"calibrationApplied", 
+			"calibrationApplied",
 			[](auto& s) {
 				if (calibrationApplied.lastTs() == CurrentTime) {
 					if (calibrationApplied.last()) {
@@ -128,7 +137,25 @@ namespace Metrics {
 					}
 				}
 			}
-		}
+		},
+
+		{
+			"slamfix_phase",
+			[](auto& s) {
+				if (slamfix_phase.lastTs() == CurrentTime) {
+					switch (slamfix_phase.last()) {
+						case 0: s << "BOOTSTRAP"; break;
+						case 1: s << "TRACKING";  break;
+						case 2: s << "RESET";     break;
+					}
+				}
+			}
+		},
+		TS_FIELD(slamfix_innov_pos_mm),
+		TS_FIELD(slamfix_innov_rot_deg),
+		TS_FIELD(slamfix_v_lin_mm_s),
+		TS_FIELD(slamfix_v_ang_deg_s),
+		TS_FIELD(slamfix_mahal)
 	};
 	
 	
@@ -213,8 +240,15 @@ namespace Metrics {
 		logFile << "\n";
 
 		logFileIsOpen = true;
+		logJustOpened = true;
 
 		return true;
+	}
+
+	bool TakeLogOpenedFlag() {
+		bool v = logJustOpened;
+		logJustOpened = false;
+		return v;
 	}
 	
 	static bool CheckLogOpen() {

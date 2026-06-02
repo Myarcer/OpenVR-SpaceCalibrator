@@ -8,6 +8,9 @@ public:
 	~IPCClient();
 
 	void Connect();
+	bool TryConnect(int maxRetries = 5, int initialDelayMs = 200);
+	bool IsConnected() const;
+	void Disconnect();
 	protocol::Response SendBlocking(const protocol::Request &request);
 
 	void Send(const protocol::Request &request);

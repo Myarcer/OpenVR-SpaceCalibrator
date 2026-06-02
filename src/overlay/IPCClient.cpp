@@ -2,6 +2,9 @@
 #include "IPCClient.h"
 
 #include <string>
+#include <thread>
+#include <chrono>
+#include <iostream>
 
 std::string WStringToString(const std::wstring& wstr)
 {
@@ -25,12 +28,28 @@ static std::string LastErrorString(DWORD lastError)
 
 IPCClient::~IPCClient()
 {
+	Disconnect();
+}
+
+bool IPCClient::IsConnected() const
+{
+	return pipe != INVALID_HANDLE_VALUE;
+}
+
+void IPCClient::Disconnect()
+{
 	if (pipe && pipe != INVALID_HANDLE_VALUE)
+	{
 		CloseHandle(pipe);
+		pipe = INVALID_HANDLE_VALUE;
+	}
 }
 
 void IPCClient::Connect()
 {
+	// Close any existing stale connection first
+	Disconnect();
+
 	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
 
 	WaitNamedPipe(pipeName, 1000);
@@ -45,12 +64,18 @@ void IPCClient::Connect()
 	if (!SetNamedPipeHandleState(pipe, &mode, 0, 0))
 	{
 		DWORD lastError = GetLastError();
+		Disconnect();
 		throw std::runtime_error("Couldn't set pipe mode. Error " + std::to_string(lastError) + ": " + LastErrorString(lastError));
 	}
 
-	auto response = SendBlocking(protocol::Request(protocol::RequestHandshake));
+	// Use raw Send/Receive for handshake to avoid recursion through SendBlocking's
+	// auto-reconnect logic
+	protocol::Request handshake(protocol::RequestHandshake);
+	Send(handshake);
+	auto response = Receive();
 	if (response.type != protocol::ResponseHandshake || response.protocol.version != protocol::Version)
 	{
+		Disconnect();
 		throw std::runtime_error(
 			"Incorrect driver version installed, try reinstalling Space Calibrator. (Client: " +
 			std::to_string(protocol::Version) +
@@ -61,10 +86,64 @@ void IPCClient::Connect()
 	}
 }
 
+bool IPCClient::TryConnect(int maxRetries, int initialDelayMs)
+{
+	int delayMs = initialDelayMs;
+
+	for (int attempt = 1; attempt <= maxRetries; attempt++)
+	{
+		try
+		{
+			Connect();
+			return true;
+		}
+		catch (const std::runtime_error &e)
+		{
+			std::cerr << "IPC connect attempt " << attempt << "/" << maxRetries
+				<< " failed: " << e.what() << std::endl;
+
+			if (attempt < maxRetries)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+				delayMs = std::min(delayMs * 2, 2000); // exponential backoff, cap at 2s
+			}
+		}
+	}
+
+	return false;
+}
+
 protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 {
-	Send(request);
-	return Receive();
+	// If not connected, attempt reconnect before sending
+	if (!IsConnected())
+	{
+		if (!TryConnect(3, 100))
+		{
+			throw std::runtime_error("IPC not connected and reconnect failed");
+		}
+	}
+
+	try
+	{
+		Send(request);
+		return Receive();
+	}
+	catch (const std::runtime_error &)
+	{
+		// Pipe may have broken — try one reconnect + resend
+		std::cerr << "IPC send failed, attempting reconnect..." << std::endl;
+		Disconnect();
+
+		if (!TryConnect(3, 100))
+		{
+			throw;
+		}
+
+		// Resend after successful reconnect
+		Send(request);
+		return Receive();
+	}
 }
 
 void IPCClient::Send(const protocol::Request &request)

@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
 #include "Protocol.h"
+#include "DriftFilter.h"
 
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
@@ -119,6 +120,25 @@ void CalibrationCalc::Clear() {
 	m_axisVariance = 0.0;
 	m_refToTargetPose = Eigen::AffineCompact3d::Identity();
 	m_relativePosCalibrated = false;
+	if (m_driftFilter) m_driftFilter->Reset();
+}
+
+CalibrationCalc::CalibrationCalc()
+	: enableStaticRecalibration(true), m_isValid(false), m_calcCycle(0),
+	  m_driftFilter(std::make_unique<DriftFilter>()) {}
+
+CalibrationCalc::~CalibrationCalc() = default;
+
+void CalibrationCalc::SlamFixDriftReset() {
+	if (m_driftFilter) m_driftFilter->Reset();
+}
+
+bool CalibrationCalc::SlamFixConsumeResetEvent() {
+	return m_driftFilter ? m_driftFilter->ConsumeResetEvent() : false;
+}
+
+double CalibrationCalc::SlamFixLastMahalanobis() const {
+	return m_driftFilter ? m_driftFilter->LastMahalanobis() : 0.0;
 }
 
 std::vector<bool> CalibrationCalc::DetectOutliers() const {
@@ -634,7 +654,220 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const {
 	return true;
 }
 
+// SLAM-Fix v2: SE(3) Extended Kalman Filter drift step. See header + plan.md.
+//
+// State: T (drift transform) in SE(3), v (drift velocity) in se(3) tangent.
+// Measurement: T_meas = ref_world * R * target_world^-1 (latest sample).
+// Process noise Q scales with HMD linear/angular speed (filter trusts SLAM
+//   less when user is walking/turning - which is when drift accumulates).
+// Measurement noise R inflates with (omega * lever_arm)^2 (replaces the old
+//   binary motion gate; samples are still consumed, just down-weighted).
+// Sustained Mahalanobis > thresh -> snap state to T_meas + inflate cov.
+bool CalibrationCalc::SlamFixDriftStep(double dt,
+	double lin_speed_q_mps, double ang_speed_q_radps,
+	double lin_speed_r_mps, double ang_speed_r_radps,
+	double lever_arm_m,
+	double *innovation_pos_m, double *innovation_rot_rad,
+	double *mahalanobis) {
+	if (innovation_pos_m) *innovation_pos_m = 0.0;
+	if (innovation_rot_rad) *innovation_rot_rad = 0.0;
+	if (mahalanobis) *mahalanobis = 0.0;
 
+	if (!m_relativePosCalibrated) return false;
+	if (m_samples.empty()) return false;
+
+	const Sample& s = m_samples.back();
+	if (!s.valid) return false;
+
+	// T_meas in world. Same pattern as CalibrateByRelPose() but per-sample.
+	Eigen::AffineCompact3d Tmeas_aff(
+		s.ref.ToAffine() * m_refToTargetPose * s.target.ToAffine().inverse()
+	);
+
+	// Convert to SE3d via quaternion (handles minor non-orthogonality).
+	Eigen::Quaterniond q_meas(Tmeas_aff.rotation());
+	q_meas.normalize();
+	Sophus::SE3d T_meas(q_meas, Tmeas_aff.translation());
+
+	// Bootstrap-into-tracking: snap on first valid measurement.
+	if (!m_isValid) {
+		m_driftFilter->ResetTo(T_meas);
+		m_driftFilter->MarkInitialized();
+		m_estimatedTransformation = Tmeas_aff;
+		m_isValid = true;
+		return true;
+	}
+
+	// Clamp dt to sane range.
+	if (dt < 0.001) dt = 0.001;
+	if (dt > 0.1) dt = 0.1;
+
+	m_driftFilter->Predict(dt, lin_speed_q_mps, ang_speed_q_radps);
+	m_driftFilter->Update(T_meas, lin_speed_r_mps, ang_speed_r_radps, lever_arm_m,
+		innovation_pos_m, innovation_rot_rad, mahalanobis);
+
+	// Write posterior into m_estimatedTransformation.
+	const Sophus::SE3d& T_post = m_driftFilter->Transform();
+	Eigen::AffineCompact3d Tpost_aff;
+	Tpost_aff.linear() = T_post.rotationMatrix();
+	Tpost_aff.translation() = T_post.translation();
+	m_estimatedTransformation = Tpost_aff;
+	return true;
+}
+
+
+
+bool CalibrationCalc::RefineRMount(double blend_alpha,
+                                   double max_pos_delta_m,
+                                   double max_rot_delta_rad) {
+	if (!m_relativePosCalibrated || !m_isValid) return false;
+	if (m_samples.size() < 20) return false;
+
+	// CRITICAL: Derive R_mount from STATELESS Kabsch, NOT the EKF output.
+	// Using the EKF's m_estimatedTransformation creates a circular lock:
+	// EKF drift → absorbed into R_mount → T_meas confirms drifted state
+	// → innovation drops → drift locked in forever, growing each cycle.
+	//
+	// ComputeCalibration() uses raw sample-pair rotation deltas (Kabsch SVD)
+	// which are independent of both R_mount and EKF state.
+	Eigen::AffineCompact3d kabschCal = ComputeCalibration(true);
+
+	// Validate: need enough rotational variance for Kabsch to be reliable.
+	double axisVar = ComputeAxisVariance(kabschCal)(1);
+	if (axisVar < AxisVarianceThreshold) return false;
+
+	// RMS error check.
+	const auto posOffset = ComputeRefToTargetOffset(kabschCal);
+	double rmsError = RetargetingErrorRMS(posOffset, kabschCal);
+	if (rmsError > 0.1) return false;
+
+	// Derive R_mount from the Kabsch result (independent ground truth).
+	Eigen::AffineCompact3d new_rmount = EstimateRefToTargetPose(kabschCal);
+
+	// Compute delta between current and new R_mount.
+	Eigen::Vector3d pos_delta = new_rmount.translation() - m_refToTargetPose.translation();
+	double pos_delta_m = pos_delta.norm();
+
+	Eigen::Matrix3d rot_delta = m_refToTargetPose.rotation().transpose() * new_rmount.rotation();
+	double rot_trace = std::min(3.0, std::max(-1.0, rot_delta.trace()));
+	double rot_delta_rad = std::acos((rot_trace - 1.0) / 2.0);
+
+	bool is_large = (pos_delta_m > max_pos_delta_m) || (rot_delta_rad > max_rot_delta_rad);
+
+	if (is_large) {
+		m_refToTargetPose = new_rmount;
+	} else {
+		// Translation: lerp.
+		m_refToTargetPose.translation() =
+			(1.0 - blend_alpha) * m_refToTargetPose.translation()
+			+ blend_alpha * new_rmount.translation();
+		// Rotation: SLERP.
+		Eigen::Quaterniond q_old(m_refToTargetPose.rotation());
+		Eigen::Quaterniond q_new(new_rmount.rotation());
+		q_old.normalize();
+		q_new.normalize();
+		if (q_old.dot(q_new) < 0.0) q_new.coeffs() = -q_new.coeffs();
+		Eigen::Quaterniond q_blended = q_old.slerp(blend_alpha, q_new);
+		q_blended.normalize();
+		m_refToTargetPose.linear() = q_blended.toRotationMatrix();
+	}
+
+	return true;
+}
+
+bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double maxRelErr, double* out_axisVariance) {
+	if (out_axisVariance) *out_axisVariance = 0.0;
+	if (m_samples.size() < 50) return false;
+	if (!m_relativePosCalibrated || !m_isValid) return false;
+
+	// Confidence-gated recenter. The EKF snaps to a fresh Kabsch solution ONLY
+	// when that solution passes the SAME confidence test the FAST/continuous
+	// preset uses to accept a calibration (see ComputeIncremental):
+	//   (a) enough rotational variance -> rotation observable (NOT low-motion),
+	//   (b) low absolute RMS error     -> the Kabsch fit itself is trustworthy,
+	//   (c) better than the current EKF state by the contThr margin -> only
+	//       disturb the filter when the new solution is genuinely an improvement.
+	// So the recenter is as predictable as FAST: it fires only when FAST itself
+	// would be "certain" after enough motion - never on a timer, never in a
+	// low-motion state where the Kabsch fit may not be calibrated yet.
+	Eigen::AffineCompact3d kabschCal = ComputeCalibration(ignoreOutliers);
+	double axisVar = ComputeAxisVariance(kabschCal)(1);
+	if (out_axisVariance) *out_axisVariance = axisVar;
+
+	// (a) Variance gate: require full rotational observability (full Kabsch).
+	// The old low-variance "translation-only" path is removed - correcting toward
+	// a Kabsch fit that isn't confidently calibrated is exactly what the user
+	// flagged as wrong.
+	const double FULL_KABSCH_THRESH = 0.01;
+	if (axisVar < FULL_KABSCH_THRESH) return false;
+
+	// (b) Absolute error gate: the Kabsch fit must itself be good.
+	const auto posOffset = ComputeRefToTargetOffset(kabschCal);
+	double rmsError = RetargetingErrorRMS(posOffset, kabschCal);
+	if (rmsError > maxRelErr) return false;
+
+	// (c) Improvement gate (FAST's exact acceptance test): only recenter if the
+	// Kabsch fit beats the current - possibly drifted - EKF state by the contThr
+	// margin. This also fixes "never re-centers": a drifted EKF has a high error
+	// here, so a clean Kabsch fit wins and snaps it back no matter how far it
+	// drifted - unlike the old hard 100mm cap, which rejected exactly those big
+	// recoveries and locked the drift in.
+	const auto curOffset = ComputeRefToTargetOffset(m_estimatedTransformation);
+	double curError = RetargetingErrorRMS(curOffset, m_estimatedTransformation);
+	if (rmsError * threshold >= curError) return false;
+
+	// Divergence sanity: skip sub-mm churn, and reject only physically absurd
+	// jumps (numerically broken Kabsch) - NOT large-but-confident corrections.
+	Eigen::Vector3d posDiff = kabschCal.translation() - m_estimatedTransformation.translation();
+	double posDiffM = posDiff.norm();
+	Eigen::Matrix3d rotDiff = m_estimatedTransformation.rotation().transpose() * kabschCal.rotation();
+	double rotTrace = std::min(3.0, std::max(-1.0, rotDiff.trace()));
+	double rotDiffRad = std::acos((rotTrace - 1.0) / 2.0);
+	if (posDiffM < 0.005 && rotDiffRad < 0.00873) return false;   // trivial, leave it
+	if (posDiffM > 1.0 || rotDiffRad > 0.52) return false;        // >1m / >30deg = garbage
+
+	// Estimate R_mount from RECENT samples only (tail of buffer).
+	{
+		const size_t RECENT_COUNT = 30;
+		size_t total = m_samples.size();
+		size_t start = (total > RECENT_COUNT) ? (total - RECENT_COUNT) : 0;
+
+		int validCount = 0;
+		PoseAverager avg(std::min(RECENT_COUNT, total));
+		for (size_t i = start; i < total; ++i) {
+			if (!m_samples[i].valid) continue;
+			auto pose = Eigen::Affine3d(
+				m_samples[i].ref.ToAffine().inverse() * kabschCal * m_samples[i].target.ToAffine());
+			avg.Push(Eigen::AffineCompact3d(pose));
+			++validCount;
+		}
+		if (validCount >= 4) {
+			m_refToTargetPose = avg.Average();
+		} else {
+			m_refToTargetPose = EstimateRefToTargetPose(kabschCal);
+		}
+	}
+
+	// Snap EKF to Kabsch-derived calibration.
+	Eigen::Quaterniond q_kabsch(kabschCal.rotation());
+	q_kabsch.normalize();
+	Sophus::SE3d T_kabsch(q_kabsch, kabschCal.translation());
+	m_driftFilter->ResetTo(T_kabsch);
+
+	m_estimatedTransformation = kabschCal;
+	return true;
+}
+
+void CalibrationCalc::ComputeCurrentCalMetrics(double* rmsError, Eigen::Vector3d* posOffset) const {
+	if (!m_isValid || m_samples.size() < 2) {
+		if (rmsError) *rmsError = INFINITY;
+		if (posOffset) *posOffset = Eigen::Vector3d::Zero();
+		return;
+	}
+	auto offset = ComputeRefToTargetOffset(m_estimatedTransformation);
+	if (posOffset) *posOffset = offset;
+	if (rmsError) *rmsError = RetargetingErrorRMS(offset, m_estimatedTransformation);
+}
 
 bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 	auto calibration = ComputeCalibration(ignoreOutliers);

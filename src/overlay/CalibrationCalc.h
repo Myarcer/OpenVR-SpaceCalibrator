@@ -5,6 +5,9 @@
 #include <vector>
 #include <deque>
 #include <iostream>
+#include <memory>
+
+class DriftFilter;
 
 struct Pose
 {
@@ -101,6 +104,63 @@ public:
 	bool ComputeOneshot(const bool ignoreOutliers);
 	bool ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers);
 
+	// SLAM-Fix per-frame SE(3) EKF drift tracker.
+	// Requires m_relativePosCalibrated == true (rigid offset already locked).
+	// Computes T_meas = ref * R * target^-1 from the most recent sample, runs
+	// EKF predict (with motion-correlated Q) + update (with omega*L-inflated R)
+	// and writes the posterior to m_estimatedTransformation.
+	//   dt: seconds since last call (clamped to [0.001, 0.1])
+	//   user_lin_speed_mps / user_ang_speed_radps: HMD velocity magnitudes
+	//   lever_arm_m: scalar puck-to-HMD offset (default 0.10m)
+	// Output params filled regardless of return: innovation magnitudes and
+	// Mahalanobis distance for logging / phase classification.
+	// Returns false if a sample is unavailable or R is not yet locked.
+	// Q (process noise) uses smoothed velocities so a single SLAM glitch
+	// doesn't pump P; R (measurement noise) uses raw clamped velocities so
+	// inflation reacts immediately at the start of a head turn instead of
+	// lagging by the EMA time constant.
+	bool SlamFixDriftStep(double dt,
+		double lin_speed_q_mps, double ang_speed_q_radps,
+		double lin_speed_r_mps, double ang_speed_r_radps,
+		double lever_arm_m,
+		double *innovation_pos_m, double *innovation_rot_rad,
+		double *mahalanobis);
+
+	// Force-reset the EKF (e.g. on user request or after calibration mode change).
+	void SlamFixDriftReset();
+
+	// Returns true exactly once per actual reset event (sustained Mahalanobis
+	// trip that snapped state to T_meas). Used for log phase classification.
+	bool SlamFixConsumeResetEvent();
+
+	// Internal EKF state for diagnostics (Mahalanobis, streak).
+	double SlamFixLastMahalanobis() const;
+
+	// Periodic R_mount refinement. Re-runs pose averaging on a sliding window
+	// of recent samples to update m_refToTargetPose, preventing frozen mount
+	// error from amplifying into apparent translation during head rotation.
+	// Returns true if R_mount was updated.
+	// blend_alpha: low-pass factor for small corrections (0=ignore, 1=snap)
+	// max_pos_delta_m: position threshold - larger delta triggers snap+reset
+	// max_rot_delta_rad: rotation threshold - larger delta triggers snap+reset
+	bool RefineRMount(double blend_alpha = 0.15,
+	                  double max_pos_delta_m = 0.02,
+	                  double max_rot_delta_rad = 0.035);
+
+	// Kabsch recenter for SLAM-Fix. Runs a full stateless Kabsch re-solve
+	// from the sample buffer. If the result is valid and diverges from the
+	// current EKF state, corrects both R_mount and EKF to break the circular
+	// dependency where RefineRMount absorbs EKF drift into R_mount, which
+	// then confirms the drifted state via T_meas.
+	// Two paths: full Kabsch (high axis variance) or translation-only
+	// correction using existing rotation (low variance fallback).
+	// out_axisVariance: written with computed axis variance for metrics.
+	// Returns true if a correction was applied.
+	bool SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double maxRelErr, double* out_axisVariance = nullptr);
+
+	// Compute current calibration quality metrics without modifying state.
+	void ComputeCurrentCalMetrics(double* rmsError, Eigen::Vector3d* posOffset) const;
+
 	size_t SampleCount() const {
 		return m_samples.size();
 	}
@@ -109,7 +169,8 @@ public:
 		if (!m_samples.empty()) m_samples.pop_front();
 	}
 
-	CalibrationCalc() : m_isValid(false), m_calcCycle(0), enableStaticRecalibration(true) {}
+	CalibrationCalc();
+	~CalibrationCalc();
 
 	// Debug fields
 	Eigen::Vector3d m_posOffset;
@@ -126,6 +187,8 @@ private:
 	 * That is to say, it's given by transforming the target world pose by the inverse reference pose.
 	 */
 	Eigen::AffineCompact3d m_refToTargetPose = Eigen::AffineCompact3d::Identity();
+
+	std::unique_ptr<DriftFilter> m_driftFilter;
 
 	std::deque<Sample> m_samples;
 

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <sstream>
 
 #include <Eigen/Dense>
 #include <GLFW/glfw3.h>
@@ -232,7 +233,11 @@ namespace {
 
 void InitCalibrator()
 {
-	Driver.Connect();
+	if (!Driver.TryConnect(5, 200))
+	{
+		std::cerr << "Failed to connect to Space Calibrator driver after retries, "
+			<< "will retry on next calibration tick" << std::endl;
+	}
 	shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
 }
 
@@ -258,7 +263,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	ctx.enabled = ctx.validProfile;
 
 	protocol::Request setParamsReq(protocol::RequestSetAlignmentSpeedParams);
-	setParamsReq.setAlignmentSpeedParams = ctx.alignmentSpeedParams;
+	setParamsReq.setAlignmentSpeedParams = ctx.EffectiveAlignmentSpeedParams();
 	Driver.SendBlocking(setParamsReq);
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -388,11 +393,33 @@ void StartCalibration() {
 void StartContinuousCalibration() {
 	CalCtx.hasAppliedCalibrationResult = false;
 	AssignTargets();
+
+	if (CalCtx.IsSlamFix()) {
+		// Reset per-session SLAM-Fix state.
+		CalCtx.slamFixTrackingTicks = 0;
+		CalCtx.slamFixLastTickTime = 0.0;
+		CalCtx.slamFixHmdPrevValid = false;
+		CalCtx.slamFixVelLinEma = 0.0;
+		CalCtx.slamFixVelAngEma = 0.0;
+		CalCtx.slamFixRMountRefineTicks = 0;
+		CalCtx.slamFixKabschRecenterTicks = 0;
+		calibration.SlamFixDriftReset();
+		// SLAM-Fix params are applied at-read-time via Effective*() accessors.
+		// User profile fields are NOT mutated - switching back to FAST/SLOW/etc
+		// restores the user's saved values.
+		if (CalCtx.slamFixRLocked && CalCtx.relativePosCalibrated) {
+			CalCtx.Log("SLAM-Fix mode: R loaded from profile, skipping bootstrap\n");
+		} else {
+			CalCtx.Log("SLAM-Fix mode: bootstrap (Kabsch) -> tracking (SE(3) EKF drift filter)\n");
+		}
+		CalCtx.Log("Settings locked: alignment speeds, thresholds, static recal, ignore outliers\n");
+	}
+
 	StartCalibration();
 	CalCtx.state = CalibrationState::Continuous;
 	calibration.setRelativeTransformation(CalCtx.refToTargetPose, CalCtx.relativePosCalibrated);
-	calibration.lockRelativePosition = CalCtx.lockRelativePosition;
-	if (CalCtx.lockRelativePosition) {
+	calibration.lockRelativePosition = CalCtx.EffectiveLockRelativePosition();
+	if (calibration.lockRelativePosition) {
 		CalCtx.Log("Relative position locked");
 	}
 	else {
@@ -408,13 +435,76 @@ void EndContinuousCalibration() {
 	Metrics::WriteLogAnnotation("EndContinuousCalibration");
 }
 
+static const char* SpeedName(CalibrationContext::Speed s) {
+	switch (s) {
+		case CalibrationContext::SLAM_FIX:  return "SLAM_FIX";
+		case CalibrationContext::FAST:      return "FAST";
+		case CalibrationContext::SLOW:      return "SLOW";
+		case CalibrationContext::VERY_SLOW: return "VERY_SLOW";
+	}
+	return "?";
+}
+
+static const char* StateName(CalibrationState s) {
+	switch (s) {
+		case CalibrationState::None:              return "None";
+		case CalibrationState::Begin:             return "Begin";
+		case CalibrationState::Rotation:          return "Rotation";
+		case CalibrationState::Translation:       return "Translation";
+		case CalibrationState::Editing:           return "Editing";
+		case CalibrationState::Continuous:        return "Continuous";
+		case CalibrationState::ContinuousStandby: return "ContinuousStandby";
+	}
+	return "?";
+}
+
+// Writes a "# [ts] SETTINGS ..." annotation into the debug log whenever the
+// user-facing settings change (mode switch test<->SLAM_FIX, scale, thresholds,
+// flags, devices) or when a fresh log file is opened. Called once per tick before
+// WriteLogEntry; change-detection keeps it from repeating every frame.
+static void LogSettingsIfChanged() {
+	if (!Metrics::enableLogs) return;
+
+	const auto& c = CalCtx;
+	const auto asp = c.EffectiveAlignmentSpeedParams();
+	std::ostringstream ss;
+	ss << "SETTINGS"
+	   << " mode=" << SpeedName(c.calibrationSpeed) << (c.IsSlamFix() ? "(slam)" : "(test)")
+	   << " state=" << StateName(c.state)
+	   << " scale=" << c.calibratedScale
+	   << " refID=" << c.referenceID << " targetID=" << c.targetID
+	   << " refSys=" << (c.referenceTrackingSystem.empty() ? "-" : c.referenceTrackingSystem)
+	   << " tgtSys=" << (c.targetTrackingSystem.empty() ? "-" : c.targetTrackingSystem)
+	   << " contThr=" << c.EffectiveContinuousCalibrationThreshold()
+	   << " maxRelErr=" << c.EffectiveMaxRelativeErrorThreshold()
+	   << " jitter=" << c.EffectiveJitterThreshold()
+	   << " staticRecal=" << (c.EffectiveStaticRecalibration() ? 1 : 0)
+	   << " lockRelPos=" << (c.EffectiveLockRelativePosition() ? 1 : 0)
+	   << " ignoreOutliers=" << (c.EffectiveIgnoreOutliers() ? 1 : 0)
+	   << " quashInCont=" << (c.quashTargetInContinuous ? 1 : 0)
+	   << " slamFixRLocked=" << (c.slamFixRLocked ? 1 : 0)
+	   << " enabled=" << (c.enabled ? 1 : 0)
+	   << " validProfile=" << (c.validProfile ? 1 : 0)
+	   << " alignSpd[t/s/l]=" << asp.align_speed_tiny << "/" << asp.align_speed_small << "/" << asp.align_speed_large;
+
+	std::string snap = ss.str();
+	static std::string lastSnap;
+	bool reopened = Metrics::TakeLogOpenedFlag();
+	if (reopened || snap != lastSnap) {
+		Metrics::WriteLogAnnotation(snap.c_str());
+		Metrics::TakeLogOpenedFlag(); // consume the flag set if this write opened the file
+		lastSnap = snap;
+	}
+}
+
 void CalibrationTick(double time)
 {
 	if (!vr::VRSystem())
 		return;
 
 	auto &ctx = CalCtx;
-	if ((time - ctx.timeLastTick) < 0.05)
+	double tickInterval = ctx.IsSlamFix() ? 0.01 : 0.05;
+	if ((time - ctx.timeLastTick) < tickInterval)
 		return;
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
@@ -524,10 +614,10 @@ void CalibrationTick(double time)
 		}
 		
 		// @TOOD: Determine if the tracking is jittery
-		if (calibration.ReferenceJitter() > ctx.jitterThreshold) {
+		if (calibration.ReferenceJitter() > ctx.EffectiveJitterThreshold()) {
 			CalCtx.Log("Reference device is not tracking\n"); ok = false;
 		}
-		if (calibration.TargetJitter() > ctx.jitterThreshold) {
+		if (calibration.TargetJitter() > ctx.EffectiveJitterThreshold()) {
 			CalCtx.Log("Target device is not tracking\n"); ok = false;
 		}
 
@@ -553,6 +643,207 @@ void CalibrationTick(double time)
 
 	if (!CollectSample(ctx))
 	{
+		return;
+	}
+
+	// SLAM-Fix tracking phase: per-frame SE(3) EKF drift filter.
+	// Activates only after bootstrap has locked the rigid offset R
+	// (calibration.isRelativeTransformationCalibrated() == true).
+	// Bypasses the Kabsch sliding-window path for in-tracking updates.
+	//
+	// The EKF replaces the old LPF + binary motion gate + jump-streak design.
+	// - Process noise Q scales with HMD speed (filter trusts SLAM less while moving)
+	// - Measurement noise R inflates with (omega * lever_arm)^2 (no sample dropping)
+	// - Sustained Mahalanobis > thresh -> snap to T_meas + inflate covariance
+	if (CalCtx.state == CalibrationState::Continuous
+		&& CalCtx.IsSlamFix()
+		&& calibration.isRelativeTransformationCalibrated()
+		&& calibration.SampleCount() >= 1)
+	{
+		// dt since previous SLAM-Fix tick (clamped inside SlamFixDriftStep).
+		double dt = (ctx.slamFixLastTickTime > 0.0) ? (time - ctx.slamFixLastTickTime) : 0.01;
+		ctx.slamFixLastTickTime = time;
+
+		// FAST→SLAM gap detection: if dt > 1s, the user switched away from
+		// SLAM mode (e.g. to FAST) and back. During the gap, FAST may have
+		// corrected the calibration, but the EKF still holds stale state from
+		// before the switch. Reset EKF from the current T_meas so it picks up
+		// whatever FAST computed, instead of snapping back to the old offset.
+		if (dt > 1.0 && calibration.isValid()) {
+			char gapBuf[128];
+			snprintf(gapBuf, sizeof gapBuf, "SLAM-Fix: gap detected (dt=%.1fs), resetting EKF from T_meas\n", dt);
+			CalCtx.Log(gapBuf);
+			calibration.SlamFixDriftReset();
+			// Force re-bootstrap on next tick (m_isValid stays true but filter
+			// is re-initialized, so the next SlamFixDriftStep will snap to T_meas).
+		}
+
+		// HMD velocity magnitudes for motion-correlated Q and lever-arm R inflation.
+		// Many SLAM HMDs (Pico/Quest streaming via VirtualDesktop/ALVR) leave
+		// DriverPose_t::vecVelocity at zero, so we always finite-difference
+		// from successive HMD poses. The driver-reported velocity is used
+		// only as a sanity floor (max of the two).
+		const auto& hmdPose = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+		double driver_lin_speed = std::sqrt(
+			hmdPose.vecVelocity[0]*hmdPose.vecVelocity[0] +
+			hmdPose.vecVelocity[1]*hmdPose.vecVelocity[1] +
+			hmdPose.vecVelocity[2]*hmdPose.vecVelocity[2]);
+		double driver_ang_speed = std::sqrt(
+			hmdPose.vecAngularVelocity[0]*hmdPose.vecAngularVelocity[0] +
+			hmdPose.vecAngularVelocity[1]*hmdPose.vecAngularVelocity[1] +
+			hmdPose.vecAngularVelocity[2]*hmdPose.vecAngularVelocity[2]);
+
+		double fd_lin_speed = 0.0, fd_ang_speed = 0.0;
+		if (ctx.slamFixHmdPrevValid && dt > 1e-4) {
+			double dx = hmdPose.vecPosition[0] - ctx.slamFixHmdPrevX;
+			double dy = hmdPose.vecPosition[1] - ctx.slamFixHmdPrevY;
+			double dz = hmdPose.vecPosition[2] - ctx.slamFixHmdPrevZ;
+			fd_lin_speed = std::sqrt(dx*dx + dy*dy + dz*dz) / dt;
+
+			Eigen::Quaterniond qPrev(ctx.slamFixHmdPrevQw, ctx.slamFixHmdPrevQx,
+			                         ctx.slamFixHmdPrevQy, ctx.slamFixHmdPrevQz);
+			Eigen::Quaterniond qNow(hmdPose.qRotation.w, hmdPose.qRotation.x,
+			                        hmdPose.qRotation.y, hmdPose.qRotation.z);
+			qPrev.normalize(); qNow.normalize();
+			if (qPrev.dot(qNow) < 0.0) qNow.coeffs() = -qNow.coeffs();
+			Eigen::Quaterniond qDelta = qPrev.conjugate() * qNow;
+			qDelta.normalize();
+			double dAngle = 2.0 * std::acos(std::min(1.0, std::abs(qDelta.w())));
+			fd_ang_speed = dAngle / dt;
+		}
+		ctx.slamFixHmdPrevX = hmdPose.vecPosition[0];
+		ctx.slamFixHmdPrevY = hmdPose.vecPosition[1];
+		ctx.slamFixHmdPrevZ = hmdPose.vecPosition[2];
+		ctx.slamFixHmdPrevQw = hmdPose.qRotation.w;
+		ctx.slamFixHmdPrevQx = hmdPose.qRotation.x;
+		ctx.slamFixHmdPrevQy = hmdPose.qRotation.y;
+		ctx.slamFixHmdPrevQz = hmdPose.qRotation.z;
+		ctx.slamFixHmdPrevValid = true;
+
+		double user_lin_speed_raw = std::max(driver_lin_speed, fd_lin_speed);
+		double user_ang_speed_raw = std::max(driver_ang_speed, fd_ang_speed);
+
+		// Hard-clamp to plausibly-human speeds. SLAM teleports / pose buffer
+		// hiccups produce 100x-1000x spikes (e.g. 245 m/s lin, 130 rad/s ang
+		// were observed in real logs). Anything above these limits is not real
+		// motion and must not pump process noise.
+		const double V_LIN_MAX = 3.0;       // m/s - human running
+		const double V_ANG_MAX = 6.0;       // rad/s ~= 343 deg/s - very fast head turn
+		if (user_lin_speed_raw > V_LIN_MAX) user_lin_speed_raw = V_LIN_MAX;
+		if (user_ang_speed_raw > V_ANG_MAX) user_ang_speed_raw = V_ANG_MAX;
+
+		// EMA smoothing for Q only. alpha=0.3 -> ~3-tick (30ms) time constant.
+		// Single outlier moves EMA by 30% then decays - filter sees a small
+		// transient instead of a giant Q kick.
+		const double VEL_EMA_ALPHA = 0.3;
+		ctx.slamFixVelLinEma = (1.0 - VEL_EMA_ALPHA) * ctx.slamFixVelLinEma + VEL_EMA_ALPHA * user_lin_speed_raw;
+		ctx.slamFixVelAngEma = (1.0 - VEL_EMA_ALPHA) * ctx.slamFixVelAngEma + VEL_EMA_ALPHA * user_ang_speed_raw;
+		double user_lin_speed_q = ctx.slamFixVelLinEma;
+		double user_ang_speed_q = ctx.slamFixVelAngEma;
+		// R uses raw clamped values - inflation must engage immediately at
+		// rotation onset, not lag by EMA tau (3 ticks of unprotected updates
+		// at the start of every head turn caused chronic mis-rotation).
+		double user_lin_speed_r = user_lin_speed_raw;
+		double user_ang_speed_r = user_ang_speed_raw;
+
+		// Lever arm: actual puck-to-HMD offset magnitude from the locked R_mount
+		// (was a hardcoded 0.10). The R-inflation that freezes position during a
+		// head turn must match the true geometry or rotation leaks into the
+		// estimate. Clamped to a sane range in case R_mount is degenerate.
+		double lever_arm_m = calibration.RelativeTransformation().translation().norm();
+		if (lever_arm_m < 0.05) lever_arm_m = 0.05;
+		if (lever_arm_m > 0.30) lever_arm_m = 0.30;
+
+		double innov_pos = 0.0, innov_rot = 0.0, mahal = 0.0;
+		bool ok_lp = calibration.SlamFixDriftStep(
+			dt, user_lin_speed_q, user_ang_speed_q,
+			user_lin_speed_r, user_ang_speed_r,
+			lever_arm_m,
+			&innov_pos, &innov_rot, &mahal);
+
+		// Phase classification for log:
+		//   0 = bootstrap (filter not yet initialized)
+		//   1 = tracking (normal predict+update)
+		//   2 = reset (sustained Mahalanobis trip just snapped state to T_meas)
+		int slamfix_phase = 1;
+		if (calibration.SlamFixConsumeResetEvent()) slamfix_phase = 2;
+
+		if (ok_lp && calibration.isValid()) {
+			ctx.calibratedRotation = calibration.EulerRotation();
+			ctx.calibratedTranslation = calibration.Transformation().translation() * 100.0; // cm
+			// Do NOT update refToTargetPose during tracking - R stays locked.
+			ctx.validProfile = true;
+			ScanAndApplyProfile(ctx);
+			CalCtx.hasAppliedCalibrationResult = true;
+
+			// Auto-save R to profile after 200 stable tracking ticks (~2s).
+			// This lets subsequent sessions skip bootstrap entirely.
+			ctx.slamFixTrackingTicks++;
+			if (!ctx.slamFixRLocked && ctx.slamFixTrackingTicks >= 200) {
+				ctx.slamFixRLocked = true;
+				SaveProfile(ctx);
+				CalCtx.Log("SLAM-Fix: R locked and saved to profile (bootstrap skipped next session)\n");
+			}
+		}
+
+		// Write SLAM-Fix metrics for log analysis.
+		Metrics::RecordTimestamp();
+		Metrics::slamfix_phase.Push(slamfix_phase);
+		Metrics::slamfix_innov_pos_mm.Push(innov_pos * 1000.0);
+		Metrics::slamfix_innov_rot_deg.Push(innov_rot * 180.0 / EIGEN_PI);
+		Metrics::slamfix_v_lin_mm_s.Push(user_lin_speed_r * 1000.0);
+		Metrics::slamfix_v_ang_deg_s.Push(user_ang_speed_r * 180.0 / EIGEN_PI);
+		Metrics::slamfix_mahal.Push(mahal);
+
+		// RefineRMount REMOVED: Both implementations are harmful.
+		// - EKF-based: circular lock (drift → R_mount → confirms drift)
+		// - Kabsch-based: garbage results with low rotation variance (3485mm jumps)
+		// R_mount stays frozen from bootstrap. Kabsch recenter below handles
+		// periodic correction when there's enough rotational variance.
+
+		// Kabsch recenter: confidence-gated, driven by FAST's acceptance test.
+		// The 100-tick (~1s) cadence is only an evaluation budget (a full Kabsch
+		// SVD is too costly per frame); whether it actually fires is decided
+		// entirely inside SlamFixKabschRecenter by the SAME confidence gate the
+		// FAST/continuous preset uses (variance + absolute error + improvement
+		// over the current EKF state by the contThr margin). So it recenters only
+		// when FAST itself would be certain - not on the timer, not in low motion.
+		// Feeds axis variance to the debug graph so corrections are visible.
+		ctx.slamFixKabschRecenterTicks++;
+		if (ctx.slamFixKabschRecenterTicks >= 100
+			&& calibration.SampleCount() >= 50)
+		{
+			ctx.slamFixKabschRecenterTicks = 0;
+			double axVar = 0.0;
+			if (calibration.SlamFixKabschRecenter(true,
+					CalCtx.EffectiveContinuousCalibrationThreshold(),
+					CalCtx.EffectiveMaxRelativeErrorThreshold(),
+					&axVar)) {
+				ctx.calibratedRotation = calibration.EulerRotation();
+				ctx.calibratedTranslation = calibration.Transformation().translation() * 100.0;
+				ctx.validProfile = true;
+				ScanAndApplyProfile(ctx);
+				CalCtx.Log("SLAM-Fix: Kabsch recenter corrected drift\n");
+			}
+			// Push axis variance to debug graph regardless of correction.
+			Metrics::axisIndependence.Push(axVar);
+		}
+
+		// Write standard metrics for debug graphs (otherwise frozen/stale
+		// during SLAM-Fix tracking because ComputeIncremental is bypassed).
+		{
+			double rmsError = 0.0;
+			Eigen::Vector3d posOff;
+			calibration.ComputeCurrentCalMetrics(&rmsError, &posOff);
+			Metrics::error_currentCal.Push(rmsError * 1000.0);
+			Metrics::posOffset_currentCal.Push(posOff * 1000.0);
+		}
+
+		// Trim the sample buffer - keep enough for Kabsch.
+		while (calibration.SampleCount() > 200) calibration.ShiftSample();
+
+		LogSettingsIfChanged();
+		Metrics::WriteLogEntry();
 		return;
 	}
 
@@ -596,13 +887,16 @@ void CalibrationTick(double time)
 
 	if (CalCtx.state == CalibrationState::Continuous) {
 		CalCtx.messages.clear();
-		calibration.enableStaticRecalibration = CalCtx.enableStaticRecalibration;
-		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
-		calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+		calibration.enableStaticRecalibration = CalCtx.EffectiveStaticRecalibration();
+		calibration.lockRelativePosition = CalCtx.EffectiveLockRelativePosition();
+		calibration.ComputeIncremental(lerp,
+			CalCtx.EffectiveContinuousCalibrationThreshold(),
+			CalCtx.EffectiveMaxRelativeErrorThreshold(),
+			CalCtx.EffectiveIgnoreOutliers());
 	}
 	else {
 		calibration.enableStaticRecalibration = false;
-		calibration.ComputeOneshot(CalCtx.ignoreOutliers);
+		calibration.ComputeOneshot(CalCtx.EffectiveIgnoreOutliers());
 	}
 
 	if (calibration.isValid()) {
@@ -633,6 +927,14 @@ void CalibrationTick(double time)
 	double duration = (end_time.QuadPart - start_time.QuadPart) / (double)freq.QuadPart;
 	Metrics::computationTime.Push(duration * 1000.0);
 
+	// In bootstrap phase (SLAM-Fix or any other mode), phase=0.
+	if (CalCtx.IsSlamFix()) {
+		Metrics::slamfix_phase.Push(0);
+		Metrics::slamfix_innov_pos_mm.Push(0.0);
+		Metrics::slamfix_innov_rot_deg.Push(0.0);
+	}
+
+	LogSettingsIfChanged();
 	Metrics::WriteLogEntry();
 		
 	if (CalCtx.state != CalibrationState::Continuous) {
@@ -640,8 +942,11 @@ void CalibrationTick(double time)
 		calibration.Clear();
 	}
 	else {
-		size_t drop_samples = CalCtx.SampleCount() / 10;
-		for (int i = 0; i < drop_samples; i++) {
+		// SLAM-Fix bootstrap: drop 40% of samples per cycle for faster sliding window
+		size_t drop_samples = CalCtx.IsSlamFix()
+			? CalCtx.SampleCount() * 2 / 5
+			: CalCtx.SampleCount() / 10;
+		for (size_t i = 0; i < drop_samples; i++) {
 			calibration.ShiftSample();
 		}
 	}

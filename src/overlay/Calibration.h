@@ -55,6 +55,32 @@ struct CalibrationContext
 	bool wasWaitingForTriggers = false;
 	bool hasAppliedCalibrationResult = false;
 
+	// SLAM-Fix state (not persisted across sessions except slamFixRLocked)
+	bool slamFixRLocked = false; // R saved to profile, bootstrap can be skipped
+	int slamFixTrackingTicks = 0; // frames spent in tracking phase this session
+	double slamFixLastTickTime = 0.0; // for dt computation in EKF predict
+	// Finite-difference velocity state. Many SLAM HMDs (Pico/Quest streaming via
+	// VirtualDesktop/ALVR) leave DriverPose_t::vecVelocity at zero - we compute
+	// our own from successive HMD pose deltas so motion-Q and lever-arm R
+	// inflation actually engage during walking.
+	double slamFixHmdPrevX = 0.0, slamFixHmdPrevY = 0.0, slamFixHmdPrevZ = 0.0;
+	double slamFixHmdPrevQw = 1.0, slamFixHmdPrevQx = 0.0, slamFixHmdPrevQy = 0.0, slamFixHmdPrevQz = 0.0;
+	bool   slamFixHmdPrevValid = false;
+	// EMA-smoothed velocity magnitudes. Raw finite-diff is spiky (SLAM jitter,
+	// frame-time variance, pose buffer staleness) - one 245 m/s spike pumps
+	// process noise huge for many ticks, causing snapping. EMA + hard clamp
+	// turns single-frame outliers into a small bump.
+	double slamFixVelLinEma = 0.0;
+	double slamFixVelAngEma = 0.0;
+	// Periodic R_mount refinement counter. Every N tracking ticks, re-run
+	// pose averaging to keep R_mount fresh (prevents frozen mount error from
+	// amplifying into apparent translation during head rotation).
+	int slamFixRMountRefineTicks = 0;
+	// Kabsch recenter: periodic timer replaces motion/still state machine.
+	// Runs every N ticks regardless of velocity — axis variance + RMS
+	// validation gate quality. Translation-only fallback when variance is low.
+	int slamFixKabschRecenterTicks = 0;
+
 	float xprev, yprev, zprev;
 
 	float continuousCalibrationThreshold;
@@ -70,6 +96,7 @@ struct CalibrationContext
 
 	enum Speed
 	{
+		SLAM_FIX = -1,
 		FAST = 0,
 		SLOW = 1,
 		VERY_SLOW = 2
@@ -145,6 +172,12 @@ struct CalibrationContext
 	{
 		switch (calibrationSpeed)
 		{
+		case SLAM_FIX:
+			// Bootstrap window for SLAM-Fix mode. Only used until the rigid
+			// device-to-device offset (m_refToTargetPose) is locked - after
+			// that, SLAM-Fix runs a per-frame manifold low-pass filter and
+			// does not depend on this window size.
+			return 120;
 		case FAST:
 			return 100;
 		case SLOW:
@@ -153,6 +186,58 @@ struct CalibrationContext
 			return 500;
 		}
 		return 100;
+	}
+
+	bool IsSlamFix() const { return calibrationSpeed == SLAM_FIX; }
+
+	// SLAM-Fix runtime overrides. These return SLAM-Fix-specific values when
+	// SLAM-Fix is the active speed, otherwise the user-configured value. They
+	// never mutate the persisted profile fields - the user's saved settings are
+	// preserved and restored when switching back to FAST/SLOW/VERY_SLOW.
+	//
+	// SLAM-Fix has two phases:
+	//   1) BOOTSTRAP - the existing Kabsch sliding-window path runs, with
+	//      these tuning values, until the rigid relative pose (R) locks.
+	//   2) TRACKING - per-frame closed-form T_meas = ref * R * target^-1,
+	//      blended via low-pass filter on SE(3). Bypasses the Kabsch path.
+	bool EffectiveLockRelativePosition() const {
+		// Never force lock during bootstrap - we need R to converge naturally.
+		return IsSlamFix() ? false : lockRelativePosition;
+	}
+	bool EffectiveStaticRecalibration() const {
+		return IsSlamFix() ? true : enableStaticRecalibration;
+	}
+	bool EffectiveIgnoreOutliers() const {
+		return IsSlamFix() ? true : ignoreOutliers;
+	}
+	float EffectiveContinuousCalibrationThreshold() const {
+		return IsSlamFix() ? 2.0f : continuousCalibrationThreshold;
+	}
+	float EffectiveMaxRelativeErrorThreshold() const {
+		return IsSlamFix() ? 0.025f : maxRelativeErrorThreshold;
+	}
+	float EffectiveJitterThreshold() const {
+		return IsSlamFix() ? 5.0f : jitterThreshold;
+	}
+	protocol::AlignmentSpeedParams EffectiveAlignmentSpeedParams() const {
+		if (!IsSlamFix()) return alignmentSpeedParams;
+		protocol::AlignmentSpeedParams p;
+		// Aggressive blend: visual snap once a new cal is accepted.
+		// In TRACKING phase the LPF itself controls smoothing; these only
+		// matter for the rare large innovations that get applied.
+		// Faster drift recovery: the EKF posterior is already smoothed, so the
+		// driver's extra lerp was redundant latency (~67ms tau at large=15).
+		// Bumped to cut the visible drift-then-correct lag roughly in half.
+		p.align_speed_tiny = 4.0f;
+		p.align_speed_small = 15.0f;
+		p.align_speed_large = 30.0f;
+		p.thr_trans_tiny = 0.5f / 1000.0f;
+		p.thr_trans_small = 1.0f / 1000.0f;
+		p.thr_trans_large = 5.0f / 1000.0f;
+		p.thr_rot_tiny = 0.2f * (float)(EIGEN_PI / 180.0);
+		p.thr_rot_small = 0.5f * (float)(EIGEN_PI / 180.0);
+		p.thr_rot_large = 2.0f * (float)(EIGEN_PI / 180.0);
+		return p;
 	}
 
 	struct Message

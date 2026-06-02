@@ -119,7 +119,24 @@ void IPCServer::RunThread(IPCServer *_this)
 			LOG("IPC client connected");
 
 			auto pipeInst = _this->CreatePipeInstance(nextPipe);
-			CompletedWriteCallback(0, sizeof protocol::Response, (LPOVERLAPPED) pipeInst);
+
+			// Issue the first async read directly instead of faking a write callback.
+			// The old code called CompletedWriteCallback with synthetic args, which
+			// could race with the client's handshake write and cause immediate disconnect.
+			BOOL readOk = ReadFileEx(
+				pipeInst->pipe,
+				&pipeInst->request,
+				sizeof protocol::Request,
+				(LPOVERLAPPED) pipeInst,
+				(LPOVERLAPPED_COMPLETION_ROUTINE) CompletedReadCallback
+			);
+
+			if (!readOk)
+			{
+				DWORD readErr = GetLastError();
+				LOG("Initial ReadFileEx failed for new client, error: %d. Closing pipe.", readErr);
+				_this->ClosePipeInstance(pipeInst);
+			}
 
 			connectPending = CreateAndConnectInstance(&connectOverlap, nextPipe);
 		}

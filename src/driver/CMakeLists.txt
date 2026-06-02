@@ -133,3 +133,16 @@ add_custom_command(
     ${CMAKE_SOURCE_DIR}/${DRIVER_NAME}
     ${CMAKE_BINARY_DIR}/${DRIVER_NAME}
 )
+
+# Auto-deploy driver DLL to install/bin/win64/ (SteamVR external driver path).
+# Builds now directly update the running SteamVR driver - no manual copy needed.
+# NOTE: SteamVR must be closed for this copy to succeed (DLL lock).
+add_custom_command(
+    TARGET SpaceCalibratorDriver POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${CMAKE_SOURCE_DIR}/install/bin/win64
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:SpaceCalibratorDriver>
+        ${CMAKE_SOURCE_DIR}/install/bin/win64/${DRIVER_NAME}.dll
+    COMMENT "Deploying driver DLL to install/bin/win64/ (close SteamVR first)"
+)

@@ -188,10 +188,16 @@ void CCal_DrawSettings() {
 		// Calibration Speed
 		{
 			ImGui::BeginGroupPanel("Calibration speed", panel_size);
-		
+
 			auto speed = CalCtx.calibrationSpeed;
 
-			ImGui::Columns(3, nullptr, false);
+			ImGui::Columns(4, nullptr, false);
+			if (ImGui::RadioButton(" SLAM-Fix      ", speed == CalibrationContext::SLAM_FIX)) {
+				CalCtx.calibrationSpeed = CalibrationContext::SLAM_FIX;
+			}
+			if (ImGui::IsItemHovered(0))
+				ImGui::SetTooltip("SLAM drift correction for inside-out headsets (Pico, Quest).\nBootstraps rigid mount offset via Kabsch, then tracks slow drift\nvia per-frame low-pass filter on SE(3). Locks alignment params,\nthresholds, static recal (on), ignore outliers (on), lock-relative\n(off). User settings preserved when switching back.");
+			ImGui::NextColumn();
 			if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST)) {
 				CalCtx.calibrationSpeed = CalibrationContext::FAST;
 			}
@@ -205,10 +211,20 @@ void CCal_DrawSettings() {
 			}
 			ImGui::Columns(1);
 
+			// Persist the chosen preset so it survives a restart (was reverting
+			// to Fast because the radio change never triggered a SaveProfile).
+			if (CalCtx.calibrationSpeed != speed)
+				SaveProfile(CalCtx);
+
 			ImGui::EndGroupPanel();
 		}
 
 		if (ImGui::BeginTable("SpeedThresholds", 3, 0)) {
+			const bool mega = CalCtx.IsSlamFix();
+			ImGui::BeginDisabled(mega);
+			if (mega) {
+				ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+			}
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(1);
 			ImGui::Text("Translation (mm)");
@@ -245,6 +261,11 @@ void CCal_DrawSettings() {
 				CalCtx.alignmentSpeedParams.thr_rot_small * (180.0 / EIGEN_PI), 20.0);
 
 			ImGui::EndTable();
+			if (mega) {
+				ImGui::PopStyleColor();
+				ImGui::TextDisabled("(locked by SLAM-Fix)");
+			}
+			ImGui::EndDisabled();
 		}
 
 		ImGui::EndGroupPanel();
@@ -254,12 +275,16 @@ void CCal_DrawSettings() {
 	{
 		ImGui::BeginGroupPanel("Alignment speeds", panel_size);
 
+		const bool mega_as = CalCtx.IsSlamFix();
+		ImGui::BeginDisabled(mega_as);
 		// ImGui::Separator();
 		// ImGui::Text("Alignment speeds");
-		ScaledDragFloat("Decel", CalCtx.alignmentSpeedParams.align_speed_tiny, 1.0, 0, 2.0, 0);
-		ScaledDragFloat("Slow", CalCtx.alignmentSpeedParams.align_speed_small, 1.0, 0, 2.0, 0);
-		ScaledDragFloat("Fast", CalCtx.alignmentSpeedParams.align_speed_large, 1.0, 0, 2.0, 0);
-		
+		ScaledDragFloat("Decel", CalCtx.alignmentSpeedParams.align_speed_tiny, 1.0, 0, 20.0, 0);
+		ScaledDragFloat("Slow", CalCtx.alignmentSpeedParams.align_speed_small, 1.0, 0, 20.0, 0);
+		ScaledDragFloat("Fast", CalCtx.alignmentSpeedParams.align_speed_large, 1.0, 0, 20.0, 0);
+		if (mega_as) ImGui::TextDisabled("(locked by SLAM-Fix)");
+		ImGui::EndDisabled();
+
 		ImGui::EndGroupPanel();
 	}
 	
@@ -267,8 +292,13 @@ void CCal_DrawSettings() {
 	// Section: Continuous Calibration settings
 	{
 		ImGui::BeginGroupPanel("Continuous calibration", panel_size);
+		const bool mega_cc = CalCtx.IsSlamFix();
 		{
-			// @TODO: Reduce code duplication (tooltips)
+			// Recalibration threshold and max relative error are only used in
+			// the Kabsch path (ComputeIncremental), which SLAM tracking skips.
+			// Leave them editable so the user can tune them for FAST/SLOW presets.
+			// Jitter threshold IS used by SLAM (sample collection gate).
+
 			// Recalibration threshold
 			ImGui::Text("Recalibration threshold");
 			ImGui::SameLine();
@@ -276,21 +306,25 @@ void CCal_DrawSettings() {
 			ImGui::SliderFloat("##recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
-					"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
+					"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.%s",
+					mega_cc ? "\n(not used during SLAM tracking, only bootstrap + other presets)" : "");
 			}
 			ImGui::PopID();
 
-			// Recalibration threshold
+			// Max relative error threshold
 			ImGui::Text("Max relative error threshold");
 			ImGui::SameLine();
 			ImGui::PushID("max_relative_error_threshold");
 			ImGui::SliderFloat("##max_relative_error_threshold_slider", &CalCtx.maxRelativeErrorThreshold, 0.01f, 1.0f, "%1.1f", 0);
 			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.");
+				ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.%s",
+					mega_cc ? "\n(not used during SLAM tracking, only bootstrap + other presets)" : "");
 			}
 			ImGui::PopID();
 
-			// Jitter threshold
+			// Jitter threshold — used by SLAM for sample gating
+			const bool slam_jitter = mega_cc;
+			ImGui::BeginDisabled(slam_jitter);
 			ImGui::Text("Jitter threshold");
 			ImGui::SameLine();
 			ImGui::PushID("jtter_threshold");
@@ -300,6 +334,8 @@ void CCal_DrawSettings() {
 					"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
 			}
 			ImGui::PopID();
+			if (slam_jitter) ImGui::TextDisabled("(used by SLAM sample gating)");
+			ImGui::EndDisabled();
 
 			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 			ImGui::TextWrapped("Controls how often SpaceCalibrator synchronises playspaces.");
@@ -469,16 +505,42 @@ void CCal_BasicInfo() {
 		ImGui::EndTable();
 	}
 
+	const bool mega_bi = CalCtx.IsSlamFix();
 	ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous);
 	ImGui::SameLine();
+	// Static recalibration, lock relative transform, ignore outliers are only
+	// used in the Kabsch path (ComputeIncremental). SLAM tracking bypasses
+	// that entirely. Effective*() overrides still protect bootstrap.
 	ImGui::Checkbox("Static recalibration", &CalCtx.enableStaticRecalibration);
+	if (mega_bi && ImGui::IsItemHovered()) ImGui::SetTooltip("Overridden to ON during SLAM bootstrap.\nYour setting applies to other presets.");
 	ImGui::SameLine();
 	ImGui::Checkbox("Enable debug logs", &Metrics::enableLogs);
 	ImGui::SameLine();
 	ImGui::Checkbox("Lock relative transform", &CalCtx.lockRelativePosition);
+	if (mega_bi && ImGui::IsItemHovered()) ImGui::SetTooltip("Overridden to OFF during SLAM bootstrap.\nYour setting applies to other presets.");
 	ImGui::SameLine();
 	ImGui::Checkbox("Require triggers", &CalCtx.requireTriggerPressToApply);
 	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
+	if (mega_bi && ImGui::IsItemHovered()) ImGui::SetTooltip("Overridden to ON during SLAM bootstrap.\nYour setting applies to other presets.");
+
+	if (mega_bi) {
+		const char* rLabel = CalCtx.slamFixRLocked
+			? "Re-bootstrap R (locked)"
+			: "Re-bootstrap R (bootstrapping...)";
+		if (ImGui::Button(rLabel)) {
+			// Clear cached rigid offset so next start re-runs Kabsch bootstrap.
+			CalCtx.slamFixRLocked = false;
+			CalCtx.relativePosCalibrated = false;
+			CalCtx.refToTargetPose = Eigen::AffineCompact3d::Identity();
+			SaveProfile(CalCtx);
+			if (CalCtx.state == CalibrationState::Continuous) {
+				EndContinuousCalibration();
+				StartContinuousCalibration();
+			}
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Clear cached rigid mount offset and re-run Kabsch bootstrap.\nUse this if you physically re-mounted the lighthouse tracker.");
+	}
 
 	// Status field...
 
@@ -575,8 +637,14 @@ void BuildMenu(bool runningInOverlay)
 		ImGui::Text("");
 		auto speed = CalCtx.calibrationSpeed;
 
-		ImGui::Columns(4, nullptr, false);
+		ImGui::Columns(5, nullptr, false);
 		ImGui::Text("Calibration Speed");
+
+		ImGui::NextColumn();
+		if (ImGui::RadioButton(" SLAM-Fix      ", speed == CalibrationContext::SLAM_FIX))
+			CalCtx.calibrationSpeed = CalibrationContext::SLAM_FIX;
+		if (ImGui::IsItemHovered(0))
+			ImGui::SetTooltip("SLAM drift correction for inside-out headsets (Pico, Quest).\nBootstraps rigid mount offset via Kabsch, then tracks slow drift\nvia per-frame low-pass filter on SE(3). Locks alignment params,\nthresholds, static recal (on), ignore outliers (on), lock-relative\n(off). User settings preserved when switching back.");
 
 		ImGui::NextColumn();
 		if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST))
@@ -591,6 +659,10 @@ void BuildMenu(bool runningInOverlay)
 			CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
 
 		ImGui::Columns(1);
+
+		// Persist the chosen preset so it survives a restart.
+		if (CalCtx.calibrationSpeed != speed)
+			SaveProfile(CalCtx);
 	}
 	else if (CalCtx.state == CalibrationState::Editing)
 	{
