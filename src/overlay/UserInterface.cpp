@@ -434,10 +434,10 @@ void CCal_DrawSettings() {
 		ImGui::Text("Time skew (ms)");
 		ImGui::SameLine();
 		ImGui::PushID("slam_skew");
-		if (ImGui::SliderFloat("##slam_skew", &skewMs, 0.0f, 60.0f, "%.0f")) {
+		if (ImGui::SliderFloat("##slam_skew", &skewMs, -40.0f, 80.0f, "%.0f")) {
 			CalCtx.slamFixTimeSkew = skewMs / 1000.0; changed = true;
 		}
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Assumed reference<->SLAM latency (VirtualDesktop/ALVR streaming).\nInflates measurement noise during motion.");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Signed reference<->SLAM latency (VirtualDesktop/ALVR streaming).\n>0 = SLAM lags base stations; <0 = SLAM leads (prediction overshoot).\nInflates measurement noise during motion (used as magnitude for now).");
 		ImGui::PopID();
 		ImGui::EndGroupPanel();
 

@@ -134,7 +134,10 @@ public:
         // VirtualDesktop/ALVR) creates apparent translational error
         // proportional to user linear speed. R_pos += k_skew*(v_lin*dt_skew)^2
         // absorbs this without rejecting samples.
-        double dt_skew_s         = 0.0;      // assumed time skew (s); 0 = no motion damping (snappiest)
+        double dt_skew_s         = 0.0;      // signed time skew (s); 0 = no motion damping (snappiest).
+                                             // >0 = SLAM lags ref, <0 = SLAM leads. Currently squared
+                                             // in R-inflation below, so the SIGN is informational until
+                                             // a timestamp-alignment use consumes it.
         double k_skew            = 100.0;    // R-inflation gain on (v_lin*dt_skew)^2
         // Rotation R inflation. Lighthouse rotation is fast; SLAM rotation
         // lags by dt_skew so during a head turn there is a systematic

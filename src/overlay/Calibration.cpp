@@ -565,8 +565,11 @@ static TimeSkewResult EstimateTimeSkew(const std::vector<CalibrationContext::Lat
 	normalize(ru); normalize(tu);
 
 	// 5) Normalized cross-correlation. tgt(t) ~= ref(t - skew), so we score
-	//    c(L) = mean_i tu[i] * ru[i-L] and maximize over L >= 0.
-	const int Lmin = -20, Lmax = 80;   // ms == samples at 1ms grid
+	//    c(L) = mean_i tu[i] * ru[i-L] and maximize over L. The lag is SIGNED:
+	//    L > 0 = SLAM lags the base stations (normal streaming latency); L < 0 =
+	//    SLAM leads (e.g. ALVR/VD pose prediction overshooting). The search window
+	//    is asymmetric because streaming lag dominates, but negative is allowed.
+	const int Lmin = -40, Lmax = 80;   // ms == samples at 1ms grid
 	auto corrAt = [&](int L) -> double {
 		double s = 0.0; int n = 0;
 		for (int i = 0; i < M; ++i) {
@@ -602,8 +605,11 @@ static TimeSkewResult EstimateTimeSkew(const std::vector<CalibrationContext::Lat
 	baseL = std::max(Lmin, std::min(Lmax, baseL));
 	r.baseline_score = corrAt(baseL);
 
-	// 8) Clamp to the sane streaming-latency range and gate on confidence.
-	r.skew_s = std::max(0.0, std::min(0.060, r.skew_raw_s));
+	// 8) Clamp to the (signed) search window and gate on confidence. Negative is
+	//    kept: it's a real measurement (SLAM leading). Note the filter currently
+	//    squares dt_skew in R-inflation, so the sign is informational until a
+	//    timestamp-alignment use consumes it - but we must not corrupt it to 0.
+	r.skew_s = std::max(-0.040, std::min(0.080, r.skew_raw_s));
 	if (r.confidence < 0.6) { r.reject = "low confidence - try a brisker, steadier shake"; return r; }
 	r.ok = true;
 	return r;
