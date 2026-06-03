@@ -490,8 +490,9 @@ struct TimeSkewResult {
 	double      skew_s = 0.0;       // measured (clamped) skew
 	double      skew_raw_s = 0.0;   // measured before clamping (may be <0)
 	double      confidence = 0.0;   // normalized corr at the peak [-1,1]
-	double      prev_skew_s = 0.0;  // value being compared against
-	double      prev_score = 0.0;   // normalized corr at prev_skew_s (better/worse signal)
+	double      prev_skew_s = 0.0;  // active runtime value being compared against
+	double      prev_score = 0.0;   // normalized corr at prev_skew_s
+	double      baseline_score = 0.0; // normalized corr at the original hardcoded guess (kSkewBaseline)
 	int         nSamples = 0;       // raw pose samples captured
 	int         nResampled = 0;     // uniform-grid points correlated
 	double      motionRms = 0.0;    // RMS angular speed over the window (rad/s)
@@ -590,10 +591,16 @@ static TimeSkewResult EstimateTimeSkew(const std::vector<CalibrationContext::Lat
 	r.skew_raw_s = (bestL + delta) * DT;
 	r.confidence = c0;
 
-	// 7) Score the previous value at its lag for a better/worse comparison.
+	// 7) Score the active runtime value and the original hardcoded guess
+	//    (20ms "Pico+VD typical", commit 52bd53f; later defaulted to 0) at
+	//    their lags, so the log can compare the measurement against both.
+	const double kSkewBaseline = 0.020;   // original hardcoded dt_skew guess (s)
 	int prevL = (int)std::lround(prev_skew_s / DT);
 	prevL = std::max(Lmin, std::min(Lmax, prevL));
 	r.prev_score = corrAt(prevL);
+	int baseL = (int)std::lround(kSkewBaseline / DT);
+	baseL = std::max(Lmin, std::min(Lmax, baseL));
+	r.baseline_score = corrAt(baseL);
 
 	// 8) Clamp to the sane streaming-latency range and gate on confidence.
 	r.skew_s = std::max(0.0, std::min(0.060, r.skew_raw_s));
@@ -1003,10 +1010,11 @@ void CalibrationTick(double time)
 					// large means the old value sat off the peak.
 					snprintf(lbuf, sizeof lbuf,
 						"Latency calibration done: measured %.1f ms (corr %.3f)\n"
-						"  previous %.1f ms scored corr %.3f at its lag | delta %+.3f\n"
+						"  active %.1f ms scored corr %.3f (delta %+.3f) | orig guess 20.0 ms scored corr %.3f (delta %+.3f)\n"
 						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s peakLag=%.0fms rawSkew=%.1fms]\n",
 						res.skew_s * 1000.0, res.confidence,
 						prev * 1000.0, res.prev_score, res.confidence - res.prev_score,
+						res.baseline_score, res.confidence - res.baseline_score,
 						res.nSamples, res.nResampled, res.durationS,
 						res.motionRms * 180.0 / EIGEN_PI, res.peakLagMs, res.skew_raw_s * 1000.0);
 					CalCtx.Log(lbuf);
