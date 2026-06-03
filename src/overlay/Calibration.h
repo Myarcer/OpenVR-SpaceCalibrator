@@ -108,6 +108,19 @@ struct CalibrationContext
 	double slamFixWalkStartTime = 0.0;
 	DriftRateTuner slamFixTuner;
 
+	// --- One-time latency (time-skew) calibration ---
+	// Measures the reference<->SLAM streaming latency by cross-correlating the two
+	// devices' angular-speed signals during a brisk yaw head-shake, replacing the
+	// guessed/slider dt_skew with a measured value. One-shot: separate from the
+	// drift walk and from the continuous auto-tuner.
+	struct LatencySample { double t; Eigen::Quaterniond qRef, qTgt; };
+	bool   slamFixLatencyActive = false;
+	double slamFixLatencyStartTime = 0.0;
+	float  slamFixLatencyDurationS = 6.0f;
+	std::vector<LatencySample> slamFixLatencyBuf;
+	double slamFixLatencyLastMs = -1.0;   // last measured skew (ms), -1 = none this session
+	double slamFixLatencyLastConf = 0.0;  // last measured confidence [0,1]
+
 	float xprev, yprev, zprev;
 
 	float continuousCalibrationThreshold;
@@ -331,6 +344,7 @@ void StartCalibration();
 void StartContinuousCalibration();
 void EndContinuousCalibration();
 void StartSlamDriftCalibration();   // begin the timed manual drift-rate walk
+void StartSlamLatencyCalibration(); // begin the one-time latency (time-skew) head-shake
 void SlamFixApplyTuning();          // push CalCtx drift rates / time skew into the live filter
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();

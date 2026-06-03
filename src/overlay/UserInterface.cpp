@@ -655,6 +655,26 @@ void CCal_BasicInfo() {
 			ImGui::SetTooltip(CalCtx.slamFixDriftSeeded
 				? "Continuously refine the drift rate from the EKF's own innovation\nconsistency while you use VR. Slow and outlier-robust."
 				: "Run 'Calibrate drift' once to seed a per-headset rate first.");
+
+		// --- One-time latency (time-skew) calibration ---
+		const bool shaking = CalCtx.slamFixLatencyActive;
+		ImGui::BeginDisabled(shaking || CalCtx.state != CalibrationState::Continuous);
+		if (shaking) {
+			ImGui::Button("Shaking... keep shaking 'no'");
+		} else if (ImGui::Button("Calibrate latency (shake ~6s)")) {
+			StartSlamLatencyCalibration();
+		}
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Measure the reference<->SLAM streaming latency. When you click,\n"
+				"shake your head left-right ('no') briskly for ~%.0fs. Replaces the\n"
+				"guessed time-skew slider with a measured value.",
+				CalCtx.slamFixLatencyDurationS);
+		if (CalCtx.slamFixLatencyLastMs >= 0.0) {
+			ImGui::SameLine();
+			ImGui::Text("last: %.1f ms (conf %.2f)",
+				CalCtx.slamFixLatencyLastMs, CalCtx.slamFixLatencyLastConf);
+		}
 	}
 
 	// Status field...

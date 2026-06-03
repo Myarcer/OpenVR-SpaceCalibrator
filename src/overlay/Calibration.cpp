@@ -478,6 +478,145 @@ void StartSlamDriftCalibration() {
 	Metrics::WriteLogAnnotation("StartSlamDriftCalibration");
 }
 
+// --- Latency (time-skew) estimation ------------------------------------------
+// Cross-correlates the reference (lighthouse, low-latency) and target (SLAM,
+// streamed, high-latency) angular-speed signals to recover the transport delay.
+// |omega| is rigid-body invariant to the point and to the static R_mount frame
+// offset, so it works before calibration is perfect and needs no frame
+// alignment. SLAM lags the reference, so tgt(t) ~= ref(t - skew); we find skew.
+struct TimeSkewResult {
+	bool        ok = false;
+	const char* reject = nullptr;   // reason when !ok
+	double      skew_s = 0.0;       // measured (clamped) skew
+	double      skew_raw_s = 0.0;   // measured before clamping (may be <0)
+	double      confidence = 0.0;   // normalized corr at the peak [-1,1]
+	double      prev_skew_s = 0.0;  // value being compared against
+	double      prev_score = 0.0;   // normalized corr at prev_skew_s (better/worse signal)
+	int         nSamples = 0;       // raw pose samples captured
+	int         nResampled = 0;     // uniform-grid points correlated
+	double      motionRms = 0.0;    // RMS angular speed over the window (rad/s)
+	double      durationS = 0.0;
+	double      peakLagMs = 0.0;    // integer-grid peak before parabolic refine
+};
+
+// Angular speed (rad/s) between two unit quaternions over dt, hemisphere-safe.
+static double AngularSpeed(const Eigen::Quaterniond& a, const Eigen::Quaterniond& b, double dt) {
+	Eigen::Quaterniond qa = a.normalized(), qb = b.normalized();
+	if (qa.dot(qb) < 0.0) qb.coeffs() = -qb.coeffs();
+	Eigen::Quaterniond d = (qa.conjugate() * qb).normalized();
+	double angle = 2.0 * std::acos(std::min(1.0, std::abs(d.w())));
+	return (dt > 1e-6) ? angle / dt : 0.0;
+}
+
+static TimeSkewResult EstimateTimeSkew(const std::vector<CalibrationContext::LatencySample>& buf,
+                                       double prev_skew_s) {
+	TimeSkewResult r;
+	r.prev_skew_s = prev_skew_s;
+	r.nSamples = (int)buf.size();
+	if (buf.size() < 50) { r.reject = "too few samples (need a longer/steadier window)"; return r; }
+	r.durationS = buf.back().t - buf.front().t;
+
+	// 1) Per-tick angular speed via identical FD on both streams (the half-tick
+	//    FD delay is common to both, so it cancels in the relative lag).
+	std::vector<double> tm, wRef, wTgt;
+	tm.reserve(buf.size()); wRef.reserve(buf.size()); wTgt.reserve(buf.size());
+	for (size_t k = 1; k < buf.size(); ++k) {
+		double dt = buf[k].t - buf[k - 1].t;
+		if (dt <= 1e-5 || dt > 0.1) continue;   // drop gaps / dropped frames
+		tm.push_back(0.5 * (buf[k].t + buf[k - 1].t));
+		wRef.push_back(AngularSpeed(buf[k - 1].qRef, buf[k].qRef, dt));
+		wTgt.push_back(AngularSpeed(buf[k - 1].qTgt, buf[k].qTgt, dt));
+	}
+	if (tm.size() < 50) { r.reject = "too few valid samples after gap rejection"; return r; }
+
+	// 2) Resample both onto a uniform 1ms grid (sub-tick resolution from 100Hz).
+	const double DT = 0.001;
+	double t0 = tm.front(), t1 = tm.back();
+	int M = (int)((t1 - t0) / DT);
+	if (M < 100) { r.reject = "window too short"; return r; }
+	std::vector<double> ru(M), tu(M);
+	size_t j = 0;
+	for (int i = 0; i < M; ++i) {
+		double t = t0 + i * DT;
+		while (j + 1 < tm.size() && tm[j + 1] < t) ++j;
+		size_t j2 = std::min(j + 1, tm.size() - 1);
+		double span = tm[j2] - tm[j];
+		double a = (span > 1e-9) ? (t - tm[j]) / span : 0.0;
+		a = std::max(0.0, std::min(1.0, a));
+		ru[i] = wRef[j] + a * (wRef[j2] - wRef[j]);
+		tu[i] = wTgt[j] + a * (wTgt[j2] - wTgt[j]);
+	}
+	r.nResampled = M;
+
+	// 3) Motion-energy gate (RMS of reference angular speed).
+	double sumsq = 0.0; for (double v : ru) sumsq += v * v;
+	r.motionRms = std::sqrt(sumsq / M);
+	if (r.motionRms < 0.5) { r.reject = "not enough motion - shake faster/harder"; return r; }
+
+	// 4) Zero-mean, unit-normalize.
+	auto normalize = [](std::vector<double>& s) {
+		double mean = 0.0; for (double v : s) mean += v; mean /= s.size();
+		double var = 0.0; for (double v : s) { double d = v - mean; var += d * d; }
+		double sd = std::sqrt(var / s.size());
+		if (sd < 1e-9) sd = 1.0;
+		for (double& v : s) v = (v - mean) / sd;
+	};
+	normalize(ru); normalize(tu);
+
+	// 5) Normalized cross-correlation. tgt(t) ~= ref(t - skew), so we score
+	//    c(L) = mean_i tu[i] * ru[i-L] and maximize over L >= 0.
+	const int Lmin = -20, Lmax = 80;   // ms == samples at 1ms grid
+	auto corrAt = [&](int L) -> double {
+		double s = 0.0; int n = 0;
+		for (int i = 0; i < M; ++i) {
+			int ir = i - L;
+			if (ir < 0 || ir >= M) continue;
+			s += tu[i] * ru[ir]; ++n;
+		}
+		return (n > 0) ? s / n : 0.0;
+	};
+	int bestL = 0; double bestC = -2.0;
+	for (int L = Lmin; L <= Lmax; ++L) {
+		double c = corrAt(L);
+		if (c > bestC) { bestC = c; bestL = L; }
+	}
+	r.peakLagMs = bestL;
+
+	// 6) Parabolic sub-sample refinement around the integer peak.
+	double cm = corrAt(bestL - 1), c0 = bestC, cp = corrAt(bestL + 1);
+	double denom = (cm - 2.0 * c0 + cp);
+	double delta = (std::abs(denom) > 1e-9) ? 0.5 * (cm - cp) / denom : 0.0;
+	delta = std::max(-1.0, std::min(1.0, delta));
+	r.skew_raw_s = (bestL + delta) * DT;
+	r.confidence = c0;
+
+	// 7) Score the previous value at its lag for a better/worse comparison.
+	int prevL = (int)std::lround(prev_skew_s / DT);
+	prevL = std::max(Lmin, std::min(Lmax, prevL));
+	r.prev_score = corrAt(prevL);
+
+	// 8) Clamp to the sane streaming-latency range and gate on confidence.
+	r.skew_s = std::max(0.0, std::min(0.060, r.skew_raw_s));
+	if (r.confidence < 0.6) { r.reject = "low confidence - try a brisker, steadier shake"; return r; }
+	r.ok = true;
+	return r;
+}
+
+void StartSlamLatencyCalibration() {
+	// One-time, while SLAM-Fix tracking is live. Needs both devices tracking.
+	if (!CalCtx.IsSlamFix() || CalCtx.state != CalibrationState::Continuous) {
+		CalCtx.Log("Latency calibration: start SLAM-Fix continuous calibration first\n");
+		return;
+	}
+	CalCtx.slamFixLatencyBuf.clear();
+	CalCtx.slamFixLatencyBuf.reserve(1024);
+	CalCtx.slamFixLatencyStartTime = 0.0;   // set on first tick (like the walk)
+	CalCtx.slamFixLatencyActive = true;
+	CalCtx.ClearLogOnMessage();
+	CalCtx.Log("Latency calibration: shake your head left-right ('no') briskly until done.\n");
+	Metrics::WriteLogAnnotation("StartSlamLatencyCalibration");
+}
+
 static const char* SpeedName(CalibrationContext::Speed s) {
 	switch (s) {
 		case CalibrationContext::SLAM_FIX:  return "SLAM_FIX";
@@ -825,6 +964,65 @@ void CalibrationTick(double time)
 			if (tracking) {
 				ctx.slamFixTuner.PushPos(nis_pos, lin_moving);
 				ctx.slamFixTuner.PushRot(nis_rot, ang_moving);
+			}
+		}
+
+		// One-time latency calibration: buffer both devices' orientations while
+		// the user shakes their head, then cross-correlate to measure the skew.
+		// Runs independently of the drift walk / auto-tuner (and alongside the
+		// live EKF, which keeps correcting throughout).
+		if (ctx.slamFixLatencyActive) {
+			if (ctx.slamFixLatencyStartTime <= 0.0) ctx.slamFixLatencyStartTime = time;
+			double elapsed = time - ctx.slamFixLatencyStartTime;
+			int target = (int)(ctx.slamFixLatencyDurationS + 0.5);
+			CalCtx.Progress(std::min((int)elapsed, target), target);
+
+			if (ctx.ReferencePoseIsValidSimple() && ctx.TargetPoseIsValidSimple()) {
+				const auto& rq = ctx.devicePoses[ctx.referenceID].qRotation;
+				const auto& tq = ctx.devicePoses[ctx.targetID].qRotation;
+				CalibrationContext::LatencySample s;
+				s.t = time;
+				s.qRef = Eigen::Quaterniond(rq.w, rq.x, rq.y, rq.z);
+				s.qTgt = Eigen::Quaterniond(tq.w, tq.x, tq.y, tq.z);
+				ctx.slamFixLatencyBuf.push_back(s);
+			}
+
+			if (elapsed >= ctx.slamFixLatencyDurationS) {
+				double prev = ctx.slamFixTimeSkew;
+				TimeSkewResult res = EstimateTimeSkew(ctx.slamFixLatencyBuf, prev);
+				char lbuf[512];
+				if (res.ok) {
+					ctx.slamFixTimeSkew = res.skew_s;
+					calibration.SlamFixSetTimeSkew(ctx.slamFixTimeSkew);
+					ctx.slamFixLatencyLastMs = res.skew_s * 1000.0;
+					ctx.slamFixLatencyLastConf = res.confidence;
+					// Better/worse vs the value we had: compare the alignment score
+					// the OLD skew earned to the score at the measured optimum.
+					const char* verdict =
+						(res.prev_score >= res.confidence - 0.02) ? "previous value was already well-aligned" :
+						(res.prev_score < 0.4) ? "previous value was POOR - new value much better aligned" :
+						"new value improves alignment";
+					snprintf(lbuf, sizeof lbuf,
+						"Latency calibration done: %.1f ms (conf %.2f) | was %.1f ms (scored %.2f) -> %s\n"
+						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s peakLag=%.0fms rawSkew=%.1fms]\n",
+						res.skew_s * 1000.0, res.confidence,
+						prev * 1000.0, res.prev_score, verdict,
+						res.nSamples, res.nResampled, res.durationS,
+						res.motionRms * 180.0 / EIGEN_PI, res.peakLagMs, res.skew_raw_s * 1000.0);
+					CalCtx.Log(lbuf);
+					SaveProfile(ctx);
+				} else {
+					snprintf(lbuf, sizeof lbuf,
+						"Latency calibration FAILED: %s. Keeping %.1f ms.\n"
+						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s]\n",
+						res.reject ? res.reject : "unknown",
+						prev * 1000.0,
+						res.nSamples, res.nResampled, res.durationS,
+						res.motionRms * 180.0 / EIGEN_PI);
+					CalCtx.Log(lbuf);
+				}
+				ctx.slamFixLatencyActive = false;
+				ctx.slamFixLatencyBuf.clear();
 			}
 		}
 
