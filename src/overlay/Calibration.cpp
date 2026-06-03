@@ -996,17 +996,17 @@ void CalibrationTick(double time)
 					calibration.SlamFixSetTimeSkew(ctx.slamFixTimeSkew);
 					ctx.slamFixLatencyLastMs = res.skew_s * 1000.0;
 					ctx.slamFixLatencyLastConf = res.confidence;
-					// Better/worse vs the value we had: compare the alignment score
-					// the OLD skew earned to the score at the measured optimum.
-					const char* verdict =
-						(res.prev_score >= res.confidence - 0.02) ? "previous value was already well-aligned" :
-						(res.prev_score < 0.4) ? "previous value was POOR - new value much better aligned" :
-						"new value improves alignment";
+					// Raw debug comparison, NOT a verdict: the measured lag is the
+					// correlation argmax, so corr_peak >= corr_prev always. The
+					// honest signal is the delta - near 0 means the curve is flat
+					// (latency barely affects alignment; the old value was fine),
+					// large means the old value sat off the peak.
 					snprintf(lbuf, sizeof lbuf,
-						"Latency calibration done: %.1f ms (conf %.2f) | was %.1f ms (scored %.2f) -> %s\n"
+						"Latency calibration done: measured %.1f ms (corr %.3f)\n"
+						"  previous %.1f ms scored corr %.3f at its lag | delta %+.3f\n"
 						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s peakLag=%.0fms rawSkew=%.1fms]\n",
 						res.skew_s * 1000.0, res.confidence,
-						prev * 1000.0, res.prev_score, verdict,
+						prev * 1000.0, res.prev_score, res.confidence - res.prev_score,
 						res.nSamples, res.nResampled, res.durationS,
 						res.motionRms * 180.0 / EIGEN_PI, res.peakLagMs, res.skew_raw_s * 1000.0);
 					CalCtx.Log(lbuf);
