@@ -199,8 +199,8 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 		// otherwise the anchor would follow every frame and the per-distance gain would never
 		// accumulate. 3cm cleanly separates recenter snaps from steady-tracking jitter.
 		if (!rigAnchorValid || (newTrans - lastCalTranslation).norm() > 0.03) {
-			rigAnchorHmdPos = hmdWorldPos;
-			rigAnchorValid = hmdPosValid;
+			rigAnchorHmdPos = hmdWorldPosLP;
+			rigAnchorValid = hmdLPValid;
 			lastCalTranslation = newTrans;
 		}
 	}
@@ -233,10 +233,13 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	shmem.SetPose(openVRID, pose);
 
-	// Cache the reference HMD (device 0) world position for the per-distance rig gain.
+	// Cache the reference HMD (device 0) world position for the per-distance rig gain,
+	// and low-pass it (~0.5s) so the gain follows walking translation, not head-rotation arcs.
 	if (openVRID == vr::k_unTrackedDeviceIndex_Hmd) {
 		hmdWorldPos = toIsoPose(pose).translation;
 		hmdPosValid = true;
+		if (!hmdLPValid) { hmdWorldPosLP = hmdWorldPos; hmdLPValid = true; }
+		else hmdWorldPosLP = 0.98 * hmdWorldPosLP + 0.02 * hmdWorldPos;  // a~0.98 -> tau~0.5s @ ~90Hz
 	}
 
 	auto& tf = transforms[openVRID];
@@ -259,8 +262,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		// distances. Instead shift the whole calibrated rig uniformly by (scale-1) * reference-HMD
 		// displacement from the anchor, per axis: rigid (geometry preserved) and tracks PICO's
 		// anisotropic over-reported translation as you walk. scale == {1,1,1} is a no-op.
-		if (rigAnchorValid && hmdPosValid && (tf.scale - Eigen::Vector3d::Ones()).norm() > 1e-6) {
-			Eigen::Vector3d disp = hmdWorldPos - rigAnchorHmdPos;
+		if (rigAnchorValid && hmdLPValid && (tf.scale - Eigen::Vector3d::Ones()).norm() > 1e-6) {
+			Eigen::Vector3d disp = hmdWorldPosLP - rigAnchorHmdPos;   // low-passed: walking, not rotation arcs
 			pose.vecWorldFromDriverTranslation[0] += (tf.scale(0) - 1.0) * disp(0);
 			pose.vecWorldFromDriverTranslation[1] += (tf.scale(1) - 1.0) * disp(1);
 			pose.vecWorldFromDriverTranslation[2] += (tf.scale(2) - 1.0) * disp(2);

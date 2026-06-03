@@ -372,19 +372,26 @@ int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale) const {
 	if (n < 50) return 0;
 	refMean /= (double)n; tgtMean /= (double)n;
 
-	Eigen::Vector3d Sxy = Eigen::Vector3d::Zero(), Sxx = Eigen::Vector3d::Zero();
+	// Use the RATIO OF STANDARD DEVIATIONS per axis, not covariance regression:
+	//   s_axis = sqrt(sum(d_ref^2) / sum(d_tgt^2))
+	// This is PHASE-INVARIANT: PICO is streamed with ~20-40ms latency, so ref lags
+	// target; covariance regression (sum d_ref*d_tgt) then shrinks with the phase lag
+	// and biases s low (the observed 1.1 -> 0.9 drift). The std ratio measures the scale
+	// of motion regardless of time alignment. Both ref(HMD) and target(head tracker) sit
+	// on the head, so they see the same motion (incl. rotation arcs) - valid for scale.
+	Eigen::Vector3d Srr = Eigen::Vector3d::Zero(), Stt = Eigen::Vector3d::Zero();
 	for (const auto& s : m_samples) {
 		if (!s.valid) continue;
 		Eigen::Vector3d dr = s.ref.trans - refMean;
 		Eigen::Vector3d dt = s.target.trans - tgtMean;
-		for (int a = 0; a < 3; ++a) { Sxy(a) += dr(a) * dt(a); Sxx(a) += dt(a) * dt(a); }
+		for (int a = 0; a < 3; ++a) { Srr(a) += dr(a) * dr(a); Stt(a) += dt(a) * dt(a); }
 	}
 
 	const double MIN_SPREAD = 0.25;   // m^2 (~0.5m RMS along axis) for scale to be observable
 	int updated = 0;
 	for (int a = 0; a < 3; ++a) {
-		if (Sxx(a) < MIN_SPREAD) continue;          // under-observed -> keep prior
-		double s = Sxy(a) / Sxx(a);
+		if (Stt(a) < MIN_SPREAD || Srr(a) <= 0.0) continue;  // under-observed -> keep prior
+		double s = std::sqrt(Srr(a) / Stt(a));
 		if (s < 0.8) s = 0.8;                        // clamp to a sane PICO/Quest range
 		if (s > 1.2) s = 1.2;
 		scale(a) = s; ++updated;

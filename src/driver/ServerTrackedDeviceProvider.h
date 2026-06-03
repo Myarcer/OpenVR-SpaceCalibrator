@@ -78,6 +78,12 @@ private:
 	// inter-device geometry) and cancels PICO inside-out anisotropic scale error as you walk.
 	Eigen::Vector3d hmdWorldPos = Eigen::Vector3d::Zero();
 	bool hmdPosValid = false;
+	// Low-passed HMD position the gain actually uses. Rotating the head arcs the HMD
+	// optical center (neck pivot) ~10-20cm; the head tracker arcs differently, so a raw
+	// HMD-displacement gain applied to the tracker wobbles on rotation. The LP (~0.5s)
+	// rejects the bounded rotation arcs and keeps sustained walking translation.
+	Eigen::Vector3d hmdWorldPosLP = Eigen::Vector3d::Zero();
+	bool hmdLPValid = false;
 	Eigen::Vector3d rigAnchorHmdPos = Eigen::Vector3d::Zero();
 	bool rigAnchorValid = false;
 	Eigen::Vector3d lastCalTranslation = Eigen::Vector3d::Zero();
