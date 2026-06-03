@@ -362,6 +362,13 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			VRRotationQuat(ctx.calibratedRotation),
 			ctx.calibratedScale
 		};
+		// SLAM-Fix: send the measured per-axis scale gain (anisotropic drift correction)
+		// instead of the legacy uniform scalar. Applied driver-side as a rigid per-distance
+		// rig shift that cancels the headset's scale error as the user walks.
+		if (ctx.IsSlamFix()) {
+			req.setDeviceTransform.updateScale = true;
+			req.setDeviceTransform.scale = { ctx.slamFixScale(0), ctx.slamFixScale(1), ctx.slamFixScale(2) };
+		}
 		req.setDeviceTransform.lerp = CalCtx.state == CalibrationState::Continuous;
 		req.setDeviceTransform.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
 
@@ -835,15 +842,19 @@ void CalibrationTick(double time)
 				bool gotRot = ctx.slamFixTuner.SnapRot(rotSq);
 				if (gotPos) ctx.slamFixDriftPosSq = posSq;
 				if (gotRot) ctx.slamFixDriftRotSq = rotSq;
+				// Anisotropic per-axis scale (the real per-headset drift calibration). Needs
+				// volumetric coverage - axes without enough spread keep their prior value.
+				int scaleAxes = calibration.EstimatePerAxisScale(ctx.slamFixScale);
 				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
 				ctx.slamFixWalkActive = false;
 				ctx.slamFixDriftSeeded = ctx.slamFixDriftSeeded || gotPos || gotRot;
-				char dbuf[160];
+				char dbuf[256];
 				snprintf(dbuf, sizeof dbuf,
-					"Drift calibration done: %.1f cm/m, %.2f deg/rad%s\n",
+					"Drift calibration done: %.1f cm/m, %.2f deg/rad | scale x%.3f y%.3f z%.3f (%d/3 axes)%s\n",
 					std::sqrt(ctx.slamFixDriftPosSq) * 100.0,
 					std::sqrt(ctx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
-					(gotPos || gotRot) ? "" : " (insufficient motion - try again)");
+					ctx.slamFixScale(0), ctx.slamFixScale(1), ctx.slamFixScale(2), scaleAxes,
+					(gotPos || gotRot || scaleAxes) ? "" : " (insufficient motion - walk a bigger figure-8)");
 				CalCtx.Log(dbuf);
 				SaveProfile(ctx);
 			}
@@ -856,6 +867,12 @@ void CalibrationTick(double time)
 			if (ctx.slamFixTuner.MaybeApplyPos(posSq)) { ctx.slamFixDriftPosSq = posSq; changed = true; }
 			if (ctx.slamFixTuner.MaybeApplyRot(rotSq)) { ctx.slamFixDriftRotSq = rotSq; changed = true; }
 			if (changed) {
+				// Piggyback on the tuner's windowed cadence: slowly EMA the per-axis scale
+				// toward the current buffer fit (observable axes only). Keeps scale converging
+				// during normal use without per-frame disk writes.
+				Eigen::Vector3d scaleFit = ctx.slamFixScale;
+				if (calibration.EstimatePerAxisScale(scaleFit) > 0)
+					ctx.slamFixScale = 0.8 * ctx.slamFixScale + 0.2 * scaleFit;
 				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
 				ctx.slamFixDriftSeeded = true;
 				SaveProfile(ctx);

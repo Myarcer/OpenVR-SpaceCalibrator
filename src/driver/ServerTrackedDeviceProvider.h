@@ -64,7 +64,7 @@ private:
 		bool enabled = false;
 		bool quash = false;
 		IsoTransform transform, targetTransform;
-		double scale;
+		Eigen::Vector3d scale = Eigen::Vector3d::Ones();   // per-axis SLAM scale gain (x,y,z)
 		LARGE_INTEGER lastPoll;
 		DeltaSize currentRate = DeltaSize::TINY;
 	};
@@ -72,6 +72,15 @@ private:
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];
 	Eigen::Vector3d debugTransform;
 	Eigen::Quaterniond debugRotation;
+
+	// Per-axis per-distance rig gain. The calibrated lighthouse rig is shifted uniformly by
+	// (scale-1) * (reference-HMD displacement from anchor), per axis. Rigid (preserves
+	// inter-device geometry) and cancels PICO inside-out anisotropic scale error as you walk.
+	Eigen::Vector3d hmdWorldPos = Eigen::Vector3d::Zero();
+	bool hmdPosValid = false;
+	Eigen::Vector3d rigAnchorHmdPos = Eigen::Vector3d::Zero();
+	bool rigAnchorValid = false;
+	Eigen::Vector3d lastCalTranslation = Eigen::Vector3d::Zero();
 
 	DeltaSize currentDeltaSpeed[vr::k_unMaxTrackedDeviceCount];
 

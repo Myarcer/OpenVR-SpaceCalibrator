@@ -415,7 +415,7 @@ void CCal_DrawSettings() {
 		float driftRot = (float)(std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI); // deg/rad
 		float skewMs   = (float)(CalCtx.slamFixTimeSkew * 1000.0);
 
-		ImGui::Text("Trans drift (cm/m)");
+		ImGui::Text("Trans responsiveness (cm/m)");
 		ImGui::SameLine();
 		ImGui::PushID("slam_drift_pos");
 		if (ImGui::SliderFloat("##slam_drift_pos", &driftPos, 1.0f, 25.0f, "%.1f")) {
@@ -423,7 +423,7 @@ void CCal_DrawSettings() {
 		}
 		ImGui::PopID();
 
-		ImGui::Text("Rot drift (deg/rad)");
+		ImGui::Text("Rot responsiveness (deg/rad)");
 		ImGui::SameLine();
 		ImGui::PushID("slam_drift_rot");
 		if (ImGui::SliderFloat("##slam_drift_rot", &driftRot, 0.1f, 5.0f, "%.2f")) {
@@ -627,6 +627,9 @@ void CCal_BasicInfo() {
 			std::sqrt(CalCtx.slamFixDriftPosSq) * 100.0,
 			std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
 			CalCtx.slamFixDriftSeeded ? "" : "  (default - not yet calibrated)");
+		ImGui::Text("Scale (per-axis): x%.3f  y%.3f  z%.3f%s",
+			CalCtx.slamFixScale(0), CalCtx.slamFixScale(1), CalCtx.slamFixScale(2),
+			(CalCtx.slamFixScale - Eigen::Vector3d::Ones()).norm() < 1e-4 ? "  (identity - run Calibrate drift)" : "");
 
 		const bool walking = CalCtx.slamFixWalkActive;
 		ImGui::BeginDisabled(walking || CalCtx.state != CalibrationState::Continuous);

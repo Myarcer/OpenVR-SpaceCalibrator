@@ -136,6 +136,11 @@ public:
 	void   SlamFixSetTimeSkew(double dt_skew_s);
 	double SlamFixTimeSkew() const;
 
+	// Per-axis SLAM scale estimate over the sample buffer (anisotropic drift). Regresses
+	// reference(PICO) displacement on target(lighthouse) displacement per axis. In/out: axes
+	// without enough spatial spread keep their incoming value. Returns # axes updated.
+	int    EstimatePerAxisScale(Eigen::Vector3d& scale) const;
+
 	// Force-reset the EKF (e.g. on user request or after calibration mode change).
 	void SlamFixDriftReset();
 
@@ -205,7 +210,6 @@ private:
 	std::vector<bool> DetectOutliers() const;
 	Eigen::Vector3d CalibrateRotation(const bool ignoreOutliers) const;
 	Eigen::Vector3d CalibrateTranslation(const Eigen::Matrix3d &rotation) const;
-	void CalibrateScaleOffset(const Eigen::Matrix3d &rotation, Eigen::Vector3d* out_scaleOffset, float* out_scaleFactor) const;
 
 	Eigen::AffineCompact3d ComputeCalibration(const bool ignoreOutliers) const;
 

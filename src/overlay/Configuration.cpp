@@ -204,7 +204,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["slam_fix_time_skew"].is<double>()) {
 		ctx.slamFixTimeSkew = obj["slam_fix_time_skew"].get<double>();
 	}
-	if (obj["slam_fix_autotune"].is<bool>()) {
+	// Per-axis SLAM scale gain (anisotropic drift correction).
+		if (obj["slam_fix_scale_x"].is<double>()) ctx.slamFixScale(0) = obj["slam_fix_scale_x"].get<double>();
+		if (obj["slam_fix_scale_y"].is<double>()) ctx.slamFixScale(1) = obj["slam_fix_scale_y"].get<double>();
+		if (obj["slam_fix_scale_z"].is<double>()) ctx.slamFixScale(2) = obj["slam_fix_scale_z"].get<double>();
+		if (obj["slam_fix_autotune"].is<bool>()) {
 		ctx.slamFixAutoTune = obj["slam_fix_autotune"].get<bool>();
 	}
 	if (obj["slam_fix_tune_learn_gain"].is<double>()) {
@@ -338,6 +342,10 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["slam_fix_drift_pos_sq"].set<double>(slamDriftPosSq);
 	profile["slam_fix_drift_rot_sq"].set<double>(slamDriftRotSq);
 	profile["slam_fix_time_skew"].set<double>(slamTimeSkew);
+		double slamScaleX = ctx.slamFixScale(0), slamScaleY = ctx.slamFixScale(1), slamScaleZ = ctx.slamFixScale(2);
+		profile["slam_fix_scale_x"].set<double>(slamScaleX);
+		profile["slam_fix_scale_y"].set<double>(slamScaleY);
+		profile["slam_fix_scale_z"].set<double>(slamScaleZ);
 	profile["slam_fix_autotune"].set<bool>(ctx.slamFixAutoTune);
 	profile["slam_fix_tune_learn_gain"].set<double>(slamLearnGain);
 	profile["slam_fix_tune_min_samples"].set<double>(slamMinSamples);

@@ -356,8 +356,40 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	return trans;
 }
 
-void CalibrationCalc::CalibrateScaleOffset(const Eigen::Matrix3d& rotation, Eigen::Vector3d* out_scaleOffset, float* out_scaleFactor) const {
-	// @TODO: figure out where the target and ref
+int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale) const {
+	// Anisotropic SLAM scale (inside-out depth axis errs more than lateral - see research).
+	// Regress reference(PICO/HMD) displacement on target(lighthouse) displacement per axis:
+	//   s_axis = sum(d_ref * d_tgt) / sum(d_tgt^2)
+	// s > 1 means PICO over-reports motion along that axis (the dominant PICO error). Uses
+	// centroid-relative displacements so it estimates slope (scale), not offset. Axes with too
+	// little spatial spread (e.g. vertical Y while standing) keep their incoming prior value.
+	size_t n = 0;
+	Eigen::Vector3d refMean = Eigen::Vector3d::Zero(), tgtMean = Eigen::Vector3d::Zero();
+	for (const auto& s : m_samples) {
+		if (!s.valid) continue;
+		refMean += s.ref.trans; tgtMean += s.target.trans; ++n;
+	}
+	if (n < 50) return 0;
+	refMean /= (double)n; tgtMean /= (double)n;
+
+	Eigen::Vector3d Sxy = Eigen::Vector3d::Zero(), Sxx = Eigen::Vector3d::Zero();
+	for (const auto& s : m_samples) {
+		if (!s.valid) continue;
+		Eigen::Vector3d dr = s.ref.trans - refMean;
+		Eigen::Vector3d dt = s.target.trans - tgtMean;
+		for (int a = 0; a < 3; ++a) { Sxy(a) += dr(a) * dt(a); Sxx(a) += dt(a) * dt(a); }
+	}
+
+	const double MIN_SPREAD = 0.25;   // m^2 (~0.5m RMS along axis) for scale to be observable
+	int updated = 0;
+	for (int a = 0; a < 3; ++a) {
+		if (Sxx(a) < MIN_SPREAD) continue;          // under-observed -> keep prior
+		double s = Sxy(a) / Sxx(a);
+		if (s < 0.8) s = 0.8;                        // clamp to a sane PICO/Quest range
+		if (s > 1.2) s = 1.2;
+		scale(a) = s; ++updated;
+	}
+	return updated;
 }
 
 

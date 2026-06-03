@@ -89,7 +89,11 @@ struct CalibrationContext
 	// the filter's built-in (5cm/m, ~0.01 rad/rad).
 	double slamFixDriftPosSq = 2.5e-3;
 	double slamFixDriftRotSq = 1e-4;
-	double slamFixTimeSkew   = 0.020;   // assumed streaming latency (s)
+	double slamFixTimeSkew   = 0.0;     // assumed streaming latency (s); 0 = snappiest (default)
+	// Per-axis SLAM scale gain (x,y,z), measured per-headset over a calibration walk. {1,1,1}
+	// = identity. >1 means PICO over-reports motion along that axis; applied driver-side as a
+	// rigid per-distance rig shift that cancels the anisotropic scale error as you walk.
+	Eigen::Vector3d slamFixScale = Eigen::Vector3d::Ones();
 	bool   slamFixAutoTune   = false;   // continuous refinement (off until seeded)
 	bool   slamFixDriftSeeded = false;  // a manual walk (or load) has set a real rate
 	// Auto-tuner controls (exposed in Settings, persisted).
@@ -130,6 +134,7 @@ struct CalibrationContext
 
 	CalibrationContext() {
 		calibratedScale = 1.0;
+		slamFixScale = Eigen::Vector3d::Ones();
 		memset(devicePoses, 0, sizeof(devicePoses));
 		ResetConfig();
 	}
@@ -183,6 +188,7 @@ struct CalibrationContext
 		calibratedRotation = Eigen::Vector3d();
 		calibratedTranslation = Eigen::Vector3d();
 		calibratedScale = 1.0;
+		slamFixScale = Eigen::Vector3d::Ones();
 		referenceTrackingSystem = "";
 		targetTrackingSystem = "";
 		enabled = false;

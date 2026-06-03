@@ -188,6 +188,21 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 		if (!newTransform.lerp) {
 			tf.transform.translation = tf.targetTransform.translation;
 		}
+
+		// Capture a fresh per-distance-gain anchor only when the calibration translation
+		// genuinely changes (a new solution), not on identical per-frame re-pushes. A locked
+		// calibration keeps one anchor so the gain accumulates across the room; continuous
+		// calibration re-solves constantly, keeping the gain contribution near zero on its own.
+		Eigen::Vector3d newTrans = convert(newTransform.translation);
+		// Reset the gain anchor only on a meaningful re-seed (a recenter snap, ~cm-scale), NOT
+		// on the sub-mm per-frame translation the SLAM-Fix EKF pushes in continuous mode -
+		// otherwise the anchor would follow every frame and the per-distance gain would never
+		// accumulate. 3cm cleanly separates recenter snaps from steady-tracking jitter.
+		if (!rigAnchorValid || (newTrans - lastCalTranslation).norm() > 0.03) {
+			rigAnchorHmdPos = hmdWorldPos;
+			rigAnchorValid = hmdPosValid;
+			lastCalTranslation = newTrans;
+		}
 	}
 
 	if (newTransform.updateRotation) {
@@ -199,7 +214,7 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	}
 
 	if (newTransform.updateScale)
-		tf.scale = newTransform.scale;
+		tf.scale = convert(newTransform.scale);   // per-axis vec3
 
 	tf.quash = newTransform.quash;
 }
@@ -218,6 +233,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	shmem.SetPose(openVRID, pose);
 
+	// Cache the reference HMD (device 0) world position for the per-distance rig gain.
+	if (openVRID == vr::k_unTrackedDeviceIndex_Hmd) {
+		hmdWorldPos = toIsoPose(pose).translation;
+		hmdPosValid = true;
+	}
+
 	auto& tf = transforms[openVRID];
 
 	if (tf.quash) {
@@ -226,17 +247,24 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecPosition[2] = -pose.vecWorldFromDriverTranslation[2];
 	} else if (tf.enabled)
 	{
-		// @TODO: Offset, scale, and re-offset
-		pose.vecPosition[0] *= tf.scale;
-		pose.vecPosition[1] *= tf.scale;
-		pose.vecPosition[2] *= tf.scale;
-
 		auto deviceWorldPose = toIsoPose(pose);
 		tf.currentRate = GetTransformDeltaSize(tf.currentRate, deviceWorldPose, tf.transform, tf.targetTransform);
 		double lerp = GetTransformRate(tf.currentRate);
 
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
+
+		// Per-axis per-distance rig gain. Replaces the old origin-pivot `vecPosition *= scale`,
+		// which scaled each device about the lighthouse origin and distorted inter-device
+		// distances. Instead shift the whole calibrated rig uniformly by (scale-1) * reference-HMD
+		// displacement from the anchor, per axis: rigid (geometry preserved) and tracks PICO's
+		// anisotropic over-reported translation as you walk. scale == {1,1,1} is a no-op.
+		if (rigAnchorValid && hmdPosValid && (tf.scale - Eigen::Vector3d::Ones()).norm() > 1e-6) {
+			Eigen::Vector3d disp = hmdWorldPos - rigAnchorHmdPos;
+			pose.vecWorldFromDriverTranslation[0] += (tf.scale(0) - 1.0) * disp(0);
+			pose.vecWorldFromDriverTranslation[1] += (tf.scale(1) - 1.0) * disp(1);
+			pose.vecWorldFromDriverTranslation[2] += (tf.scale(2) - 1.0) * disp(2);
+		}
 	}
 
 	return true;
