@@ -112,6 +112,16 @@ public:
         double rot_vtrans_kill_thresh_radps = 0.35; // rad/s (~20deg/s) = clearly rotating
         double rot_vtrans_kill_factor       = 0.5;  // per-tick v_trans multiplier while rotating
 
+        // Rotation channel master switch. When false the filter NEVER rotates the
+        // drift transform: the rotation residual is dropped before it can (a)
+        // re-rotate T_ or (b) leak into the position channel through the
+        // cross-covariance during a head turn - that leak is the visible
+        // "overcorrects on rotation" standing offset. Position drift is still
+        // fully corrected, so walking while turning keeps its translational fix.
+        // Long-session yaw drift is left to the bootstrap calibration. Re-enable
+        // once the rotation transient / latency handling is reworked.
+        bool correct_rotation = false;
+
         double R_static_pos_sq   = 2.5e-5;   // (5mm)^2 lighthouse position noise
         double R_static_rot_sq   = 2.7e-3;   // (3deg)^2 - per-sample SLAM rotation noise
                                              // floor. Per-frame EKF needs much higher

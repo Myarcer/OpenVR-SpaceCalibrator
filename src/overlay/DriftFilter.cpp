@@ -141,7 +141,17 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
     Vec3 y_rot = y.tail<3>();
 
     if (out_innov_pos_m) *out_innov_pos_m = y_pos.norm();
-    if (out_innov_rot_rad) *out_innov_rot_rad = y_rot.norm();
+    if (out_innov_rot_rad) *out_innov_rot_rad = y_rot.norm();  // true measured residual (diagnostic)
+
+    // Rotation channel null (params.correct_rotation == false). Drop the rotation
+    // residual from y NOW - before it reaches S, the Mahalanobis test, or the
+    // gain - so rotation cannot be corrected, cannot trip a reset on a head-turn
+    // transient, and (critically) cannot leak into the position channel through
+    // the cross-covariance. The out_innov_rot/out_nis_rot diagnostics above and
+    // below still see the true residual via the y_rot copy.
+    if (!params.correct_rotation) {
+        y.tail<3>().setZero();
+    }
 
     // H: observe T directly (6x12), velocity unobserved per step.
     Matrix<double, 6, 12> H = Matrix<double, 6, 12>::Zero();
@@ -205,6 +215,16 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
     // Standard EKF update.
     Matrix<double, 12, 6> K = P_ * H.transpose() * S_inv;
     Matrix<double, 12, 1> dx = K * y;
+
+    // With y_rot zeroed, K's cross terms would still rotate T_ and drive v_rot
+    // from the position residual. Hard-null the rotation tangent of both the
+    // transform and velocity updates so the rotation stays locked to its
+    // bootstrap value (v_rot then stays 0, so Predict's Exp(v*dt) is pure
+    // translation and T_'s rotation never moves).
+    if (!params.correct_rotation) {
+        dx.segment<3>(3).setZero();   // T rotation tangent
+        dx.segment<3>(9).setZero();   // rotation drift velocity
+    }
 
     // Apply on manifold for T (multiplicative), tangent for v.
     Vec6 dT_tangent = dx.head<6>();

@@ -162,6 +162,19 @@ void ServerTrackedDeviceProvider::ApplyTransform(DeviceTransform& device, vr::Dr
 }
 
 
+// Smooth deadband factor for the per-distance rig gain. 0 below d0, 1 above d1,
+// smoothstep in between. Kills the tracker "swim" from small head-bob / posture
+// sway (|disp| inside the deadband -> ~no scale correction) while preserving full
+// correction once you actually walk. SLAM scale-error drift accumulates with
+// distance travelled, so there is genuinely nothing to correct inside the band -
+// this is a smooth onset, not a hard gate.
+static double RigGainDeadband(double dist, double d0, double d1) {
+	if (dist <= d0) return 0.0;
+	if (dist >= d1) return 1.0;
+	double t = (dist - d0) / (d1 - d0);
+	return t * t * (3.0 - 2.0 * t);   // smoothstep
+}
+
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t &lhs, const vr::HmdQuaternion_t &rhs) {
 	return {
 		(lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z),
@@ -264,9 +277,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		// anisotropic over-reported translation as you walk. scale == {1,1,1} is a no-op.
 		if (rigAnchorValid && hmdLPValid && (tf.scale - Eigen::Vector3d::Ones()).norm() > 1e-6) {
 			Eigen::Vector3d disp = hmdWorldPosLP - rigAnchorHmdPos;   // low-passed: walking, not rotation arcs
-			pose.vecWorldFromDriverTranslation[0] += (tf.scale(0) - 1.0) * disp(0);
-			pose.vecWorldFromDriverTranslation[1] += (tf.scale(1) - 1.0) * disp(1);
-			pose.vecWorldFromDriverTranslation[2] += (tf.scale(2) - 1.0) * disp(2);
+			// Soft-knee deadband: suppress small-displacement swim (head bob /
+			// posture sway), ramp the correction in smoothly past the knee.
+			const double kRigGainDeadbandLo = 0.06;  // m - below this: no correction
+			const double kRigGainDeadbandHi = 0.20;  // m - full correction by here
+			Eigen::Vector3d dispEff = disp * RigGainDeadband(disp.norm(), kRigGainDeadbandLo, kRigGainDeadbandHi);
+			pose.vecWorldFromDriverTranslation[0] += (tf.scale(0) - 1.0) * dispEff(0);
+			pose.vecWorldFromDriverTranslation[1] += (tf.scale(1) - 1.0) * dispEff(1);
+			pose.vecWorldFromDriverTranslation[2] += (tf.scale(2) - 1.0) * dispEff(2);
 		}
 	}
 
