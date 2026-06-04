@@ -853,54 +853,67 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 	if (m_samples.size() < 50) return false;
 	if (!m_relativePosCalibrated || !m_isValid) return false;
 
-	// Confidence-gated recenter. The EKF snaps to a fresh Kabsch solution ONLY
-	// when that solution passes the SAME confidence test the FAST/continuous
-	// preset uses to accept a calibration (see ComputeIncremental):
-	//   (a) enough rotational variance -> rotation observable (NOT low-motion),
-	//   (b) low absolute RMS error     -> the Kabsch fit itself is trustworthy,
-	//   (c) better than the current EKF state by the contThr margin -> only
-	//       disturb the filter when the new solution is genuinely an improvement.
-	// So the recenter is as predictable as FAST: it fires only when FAST itself
-	// would be "certain" after enough motion - never on a timer, never in a
-	// low-motion state where the Kabsch fit may not be calibrated yet.
+	// Confidence-gated recenter. R_mount is ALWAYS locked here (precondition
+	// above), so there are two valid candidate solutions and we pick by whether
+	// rotation is observable in the current buffer:
+	//
+	//   FULL KABSCH (rotation observable): re-solve rotation+translation and also
+	//     refresh the locked R_mount. Used when the user has rotated enough that
+	//     the delta-rotation axes span the space (axisVar >= threshold).
+	//
+	//   LOCKED-R TRANSLATION-ONLY (rotation NOT observable): keep the locked
+	//     rotation and re-solve ONLY the absolute translation from the buffer via
+	//     CalibrateByRelPose (average of ref*R_mount*target^-1). This is the exact
+	//     path FAST runs every tick with lockRelPos, needs zero rotational motion,
+	//     and is what lets a pure straight-line WALK re-center (the symptom: SLAM
+	//     never centered while walking corner-to-corner, FAST snapped instantly).
+	//     Re-solving rotation under low variance is what produced a bad tilt and
+	//     was flagged as wrong - translation-only never touches rotation, so it is
+	//     safe. R_mount is NOT refreshed here (it stays the trusted locked value).
+	//
+	// Either candidate then passes the same acceptance gates FAST uses:
+	//   (b) low absolute RMS error  -> the fit itself is trustworthy,
+	//   (c) better than the current (possibly drifted) EKF state by the margin.
 	Eigen::AffineCompact3d kabschCal = ComputeCalibration(ignoreOutliers);
 	double axisVar = ComputeAxisVariance(kabschCal)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
 
-	// (a) Variance gate: require full rotational observability (full Kabsch).
-	// The old low-variance "translation-only" path is removed - correcting toward
-	// a Kabsch fit that isn't confidently calibrated is exactly what the user
-	// flagged as wrong.
 	const double FULL_KABSCH_THRESH = 0.01;
-	if (axisVar < FULL_KABSCH_THRESH) return false;
+	const bool fullObservable = (axisVar >= FULL_KABSCH_THRESH);
 
-	// (b) Absolute error gate: the Kabsch fit must itself be good.
-	const auto posOffset = ComputeRefToTargetOffset(kabschCal);
-	double rmsError = RetargetingErrorRMS(posOffset, kabschCal);
+	Eigen::AffineCompact3d cand;
+	if (fullObservable) {
+		cand = kabschCal;
+	} else if (!CalibrateByRelPose(cand)) {
+		return false;
+	}
+
+	// (b) Absolute error gate: the candidate fit must itself be good.
+	const auto posOffset = ComputeRefToTargetOffset(cand);
+	double rmsError = RetargetingErrorRMS(posOffset, cand);
 	if (rmsError > maxRelErr) return false;
 
 	// (c) Improvement gate (FAST's exact acceptance test): only recenter if the
-	// Kabsch fit beats the current - possibly drifted - EKF state by the contThr
-	// margin. This also fixes "never re-centers": a drifted EKF has a high error
-	// here, so a clean Kabsch fit wins and snaps it back no matter how far it
-	// drifted - unlike the old hard 100mm cap, which rejected exactly those big
-	// recoveries and locked the drift in.
+	// candidate beats the current - possibly drifted - EKF state by the margin.
+	// A drifted EKF has a high error here, so a clean fit wins and snaps it back
+	// no matter how far it drifted.
 	const auto curOffset = ComputeRefToTargetOffset(m_estimatedTransformation);
 	double curError = RetargetingErrorRMS(curOffset, m_estimatedTransformation);
 	if (rmsError * threshold >= curError) return false;
 
 	// Divergence sanity: skip sub-mm churn, and reject only physically absurd
-	// jumps (numerically broken Kabsch) - NOT large-but-confident corrections.
-	Eigen::Vector3d posDiff = kabschCal.translation() - m_estimatedTransformation.translation();
+	// jumps (numerically broken fit) - NOT large-but-confident corrections.
+	Eigen::Vector3d posDiff = cand.translation() - m_estimatedTransformation.translation();
 	double posDiffM = posDiff.norm();
-	Eigen::Matrix3d rotDiff = m_estimatedTransformation.rotation().transpose() * kabschCal.rotation();
+	Eigen::Matrix3d rotDiff = m_estimatedTransformation.rotation().transpose() * cand.rotation();
 	double rotTrace = std::min(3.0, std::max(-1.0, rotDiff.trace()));
 	double rotDiffRad = std::acos((rotTrace - 1.0) / 2.0);
 	if (posDiffM < 0.005 && rotDiffRad < 0.00873) return false;   // trivial, leave it
 	if (posDiffM > 1.0 || rotDiffRad > 0.52) return false;        // >1m / >30deg = garbage
 
-	// Estimate R_mount from RECENT samples only (tail of buffer).
-	{
+	// Refresh the locked R_mount from RECENT samples - ONLY when we re-solved
+	// rotation (full Kabsch). The translation-only path keeps R_mount untouched.
+	if (fullObservable) {
 		const size_t RECENT_COUNT = 30;
 		size_t total = m_samples.size();
 		size_t start = (total > RECENT_COUNT) ? (total - RECENT_COUNT) : 0;
@@ -910,24 +923,24 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 		for (size_t i = start; i < total; ++i) {
 			if (!m_samples[i].valid) continue;
 			auto pose = Eigen::Affine3d(
-				m_samples[i].ref.ToAffine().inverse() * kabschCal * m_samples[i].target.ToAffine());
+				m_samples[i].ref.ToAffine().inverse() * cand * m_samples[i].target.ToAffine());
 			avg.Push(Eigen::AffineCompact3d(pose));
 			++validCount;
 		}
 		if (validCount >= 4) {
 			m_refToTargetPose = avg.Average();
 		} else {
-			m_refToTargetPose = EstimateRefToTargetPose(kabschCal);
+			m_refToTargetPose = EstimateRefToTargetPose(cand);
 		}
 	}
 
-	// Snap EKF to Kabsch-derived calibration.
-	Eigen::Quaterniond q_kabsch(kabschCal.rotation());
-	q_kabsch.normalize();
-	Sophus::SE3d T_kabsch(q_kabsch, kabschCal.translation());
-	m_driftFilter->ResetTo(T_kabsch);
+	// Snap EKF to the candidate calibration.
+	Eigen::Quaterniond q_cand(cand.rotation());
+	q_cand.normalize();
+	Sophus::SE3d T_cand(q_cand, cand.translation());
+	m_driftFilter->ResetTo(T_cand);
 
-	m_estimatedTransformation = kabschCal;
+	m_estimatedTransformation = cand;
 	return true;
 }
 
