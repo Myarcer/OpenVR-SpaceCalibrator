@@ -356,29 +356,34 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	return trans;
 }
 
-int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale) const {
+int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale, PerAxisScaleDiag* diag) const {
 	// Anisotropic SLAM scale (inside-out depth axis errs more than lateral - see research).
-	// Regress reference(PICO/HMD) displacement on target(lighthouse) displacement per axis:
-	//   s_axis = sum(d_ref * d_tgt) / sum(d_tgt^2)
-	// s > 1 means PICO over-reports motion along that axis (the dominant PICO error). Uses
-	// centroid-relative displacements so it estimates slope (scale), not offset. Axes with too
-	// little spatial spread (e.g. vertical Y while standing) keep their incoming prior value.
+	// Per axis, s = sqrt(sum(d_ref^2) / sum(d_tgt^2)) (std-ratio). s > 1 means PICO
+	// over-reports motion along that axis. Centroid-relative displacements => slope, not offset.
+	//
+	// SOUND OBSERVABILITY GATING (per the deep-research: a fit needs sufficient, non-degenerate
+	// per-axis spread to be well-conditioned). Two independent gates, both required:
+	//   (1) ENOUGH DATA   - global minimum valid-sample count (like the Kabsch path).
+	//   (2) ENOUGH SPREAD - per-axis motion RMS = sqrt(sum(d_tgt^2)/n) above a physical floor.
+	//       This is a VARIANCE (normalized by n), NOT the raw sum the old gate compared against -
+	//       the old `Stt < 0.25` grew with sample count, so ~5cm of wobble over 600 samples
+	//       passed and railed the fit to the clamp. RMS is sample-count invariant and physical.
+	//   (3) PLAUSIBILITY  - real inside-out scale error is ~2-5%. A raw ratio outside [0.90,1.10]
+	//       is a fit artifact (degenerate axis, residual phase lag), so REJECT it (keep prior)
+	//       instead of silently clamping a bad value into the profile.
+	if (diag) *diag = PerAxisScaleDiag();
+
 	size_t n = 0;
 	Eigen::Vector3d refMean = Eigen::Vector3d::Zero(), tgtMean = Eigen::Vector3d::Zero();
 	for (const auto& s : m_samples) {
 		if (!s.valid) continue;
 		refMean += s.ref.trans; tgtMean += s.target.trans; ++n;
 	}
-	if (n < 50) return 0;
+	if (diag) diag->nSamples = (int)n;
+	const size_t MIN_SAMPLES = 150;        // (1) enough data for a stable per-axis fit
+	if (n < MIN_SAMPLES) return 0;
 	refMean /= (double)n; tgtMean /= (double)n;
 
-	// Use the RATIO OF STANDARD DEVIATIONS per axis, not covariance regression:
-	//   s_axis = sqrt(sum(d_ref^2) / sum(d_tgt^2))
-	// This is PHASE-INVARIANT: PICO is streamed with ~20-40ms latency, so ref lags
-	// target; covariance regression (sum d_ref*d_tgt) then shrinks with the phase lag
-	// and biases s low (the observed 1.1 -> 0.9 drift). The std ratio measures the scale
-	// of motion regardless of time alignment. Both ref(HMD) and target(head tracker) sit
-	// on the head, so they see the same motion (incl. rotation arcs) - valid for scale.
 	Eigen::Vector3d Srr = Eigen::Vector3d::Zero(), Stt = Eigen::Vector3d::Zero();
 	for (const auto& s : m_samples) {
 		if (!s.valid) continue;
@@ -387,14 +392,19 @@ int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale) const {
 		for (int a = 0; a < 3; ++a) { Srr(a) += dr(a) * dr(a); Stt(a) += dt(a) * dt(a); }
 	}
 
-	const double MIN_SPREAD = 0.25;   // m^2 (~0.5m RMS along axis) for scale to be observable
+	const double MIN_RMS   = 0.40;   // (2) m RMS along axis (~+/-0.6m) for scale to be observable
+	const double PLAUS_LO  = 0.90;   // (3) reject fits implying >10% scale error as artifacts
+	const double PLAUS_HI  = 1.10;
 	int updated = 0;
 	for (int a = 0; a < 3; ++a) {
-		if (Stt(a) < MIN_SPREAD || Srr(a) <= 0.0) continue;  // under-observed -> keep prior
-		double s = std::sqrt(Srr(a) / Stt(a));
-		if (s < 0.8) s = 0.8;                        // clamp to a sane PICO/Quest range
-		if (s > 1.2) s = 1.2;
-		scale(a) = s; ++updated;
+		double rms = std::sqrt(Stt(a) / (double)n);
+		double s   = (Stt(a) > 0.0 && Srr(a) > 0.0) ? std::sqrt(Srr(a) / Stt(a)) : 0.0;
+		if (diag) { diag->rmsM[a] = rms; diag->rawRatio[a] = s; }
+		if (rms < MIN_RMS) { if (diag) diag->status[a] = AXIS_LOW_SPREAD; continue; }
+		if (s < PLAUS_LO || s > PLAUS_HI) { if (diag) diag->status[a] = AXIS_IMPLAUSIBLE; continue; }
+		scale(a) = s;
+		if (diag) diag->status[a] = AXIS_ACCEPTED;
+		++updated;
 	}
 	return updated;
 }

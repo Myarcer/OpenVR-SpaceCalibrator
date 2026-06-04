@@ -138,8 +138,16 @@ public:
 
 	// Per-axis SLAM scale estimate over the sample buffer (anisotropic drift). Regresses
 	// reference(PICO) displacement on target(lighthouse) displacement per axis. In/out: axes
-	// without enough spatial spread keep their incoming value. Returns # axes updated.
-	int    EstimatePerAxisScale(Eigen::Vector3d& scale) const;
+	// without enough spatial spread, or with an implausible fit, keep their incoming value.
+	// Returns # axes updated. Optional diag reports per-axis spread/ratio/status for logging.
+	enum AxisScaleStatus { AXIS_ACCEPTED = 0, AXIS_LOW_SPREAD = 1, AXIS_IMPLAUSIBLE = 2 };
+	struct PerAxisScaleDiag {
+		double rmsM[3]    = {0, 0, 0};   // per-axis target-motion RMS spread (m)
+		double rawRatio[3]= {0, 0, 0};   // raw std-ratio before accept/reject
+		int    status[3]  = {AXIS_LOW_SPREAD, AXIS_LOW_SPREAD, AXIS_LOW_SPREAD};
+		int    nSamples   = 0;
+	};
+	int    EstimatePerAxisScale(Eigen::Vector3d& scale, PerAxisScaleDiag* diag = nullptr) const;
 
 	// Force-reset the EKF (e.g. on user request or after calibration mode change).
 	void SlamFixDriftReset();

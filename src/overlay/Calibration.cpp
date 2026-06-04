@@ -471,10 +471,14 @@ void StartSlamDriftCalibration() {
 		return;
 	}
 	CalCtx.slamFixTuner.Reset();
+	// A manual walk is a fresh measurement: reset per-axis scale to identity so axes
+	// this walk does not cover (or that fail the plausibility/spread gate) fall back to
+	// "no correction" instead of inheriting a stale (possibly degenerate) prior.
+	CalCtx.slamFixScale = Eigen::Vector3d::Ones();
 	CalCtx.slamFixWalkStartTime = 0.0;  // initialized on first tick (like slamFixLastTickTime)
 	CalCtx.slamFixWalkActive = true;
 	CalCtx.ClearLogOnMessage();
-	CalCtx.Log("Drift calibration: walk straight back-and-forth across your room.\n");
+	CalCtx.Log("Drift calibration: walk a figure-8 covering the room (all axes) for the scale fit.\n");
 	Metrics::WriteLogAnnotation("StartSlamDriftCalibration");
 }
 
@@ -498,6 +502,12 @@ struct TimeSkewResult {
 	double      motionRms = 0.0;    // RMS angular speed over the window (rad/s)
 	double      durationS = 0.0;
 	double      peakLagMs = 0.0;    // integer-grid peak before parabolic refine
+	// Drivers' self-declared poseTimeOffset (s), averaged over the window. Their
+	// difference (tgt - ref) is the drivers' OWN claim of the relative skew - an
+	// independent cross-check against our measured cross-correlation lag. Often 0
+	// for streamed SLAM drivers (like vecVelocity), which is exactly why we measure.
+	double      ptoRefMean = 0.0;
+	double      ptoTgtMean = 0.0;
 };
 
 // Angular speed (rad/s) between two unit quaternions over dt, hemisphere-safe.
@@ -516,6 +526,14 @@ static TimeSkewResult EstimateTimeSkew(const std::vector<CalibrationContext::Lat
 	r.nSamples = (int)buf.size();
 	if (buf.size() < 50) { r.reject = "too few samples (need a longer/steadier window)"; return r; }
 	r.durationS = buf.back().t - buf.front().t;
+
+	// Drivers' self-declared poseTimeOffset (independent cross-check, see struct).
+	{
+		double sr = 0.0, sg = 0.0;
+		for (const auto& s : buf) { sr += s.ptoRef; sg += s.ptoTgt; }
+		r.ptoRefMean = sr / buf.size();
+		r.ptoTgtMean = sg / buf.size();
+	}
 
 	// 1) Per-tick angular speed via identical FD on both streams (the half-tick
 	//    FD delay is common to both, so it cancels in the relative lag).
@@ -991,12 +1009,14 @@ void CalibrationTick(double time)
 			CalCtx.Progress(std::min((int)elapsed, target), target);
 
 			if (ctx.ReferencePoseIsValidSimple() && ctx.TargetPoseIsValidSimple()) {
-				const auto& rq = ctx.devicePoses[ctx.referenceID].qRotation;
-				const auto& tq = ctx.devicePoses[ctx.targetID].qRotation;
+				const auto& rp = ctx.devicePoses[ctx.referenceID];
+				const auto& tp = ctx.devicePoses[ctx.targetID];
 				CalibrationContext::LatencySample s;
 				s.t = time;
-				s.qRef = Eigen::Quaterniond(rq.w, rq.x, rq.y, rq.z);
-				s.qTgt = Eigen::Quaterniond(tq.w, tq.x, tq.y, tq.z);
+				s.qRef = Eigen::Quaterniond(rp.qRotation.w, rp.qRotation.x, rp.qRotation.y, rp.qRotation.z);
+				s.qTgt = Eigen::Quaterniond(tp.qRotation.w, tp.qRotation.x, tp.qRotation.y, tp.qRotation.z);
+				s.ptoRef = rp.poseTimeOffset;
+				s.ptoTgt = tp.poseTimeOffset;
 				ctx.slamFixLatencyBuf.push_back(s);
 			}
 
@@ -1014,16 +1034,30 @@ void CalibrationTick(double time)
 					// honest signal is the delta - near 0 means the curve is flat
 					// (latency barely affects alignment; the old value was fine),
 					// large means the old value sat off the peak.
+					// Drivers' own declared offsets (tgt - ref) as an independent
+					// cross-check against our measured cross-correlation lag.
+					double ptoDeltaMs = (res.ptoTgtMean - res.ptoRefMean) * 1000.0;
 					snprintf(lbuf, sizeof lbuf,
-						"Latency calibration done: measured %.1f ms (corr %.3f)\n"
+						"Latency calibration done: measured %+.1f ms signed (corr %.3f)\n"
 						"  active %.1f ms scored corr %.3f (delta %+.3f) | orig guess 20.0 ms scored corr %.3f (delta %+.3f)\n"
-						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s peakLag=%.0fms rawSkew=%.1fms]\n",
-						res.skew_s * 1000.0, res.confidence,
+						"  poseTimeOffset: ref=%+.1fms tgt=%+.1fms -> declared skew %+.1fms (vs our %+.1fms)\n"
+						"  [samples=%d resampled=%d dur=%.1fs motionRMS=%.0f deg/s peakLag=%.0fms applied(|clamped|)=%.1fms]\n",
+						res.skew_raw_s * 1000.0, res.confidence,
 						prev * 1000.0, res.prev_score, res.confidence - res.prev_score,
 						res.baseline_score, res.confidence - res.baseline_score,
+						res.ptoRefMean * 1000.0, res.ptoTgtMean * 1000.0, ptoDeltaMs, res.skew_raw_s * 1000.0,
 						res.nSamples, res.nResampled, res.durationS,
-						res.motionRms * 180.0 / EIGEN_PI, res.peakLagMs, res.skew_raw_s * 1000.0);
+						res.motionRms * 180.0 / EIGEN_PI, res.peakLagMs, res.skew_s * 1000.0);
 					CalCtx.Log(lbuf);
+					// Persist a single-line summary to the metrics log so it survives
+					// the session (the in-app panel / cerr above do not).
+					char abuf[256];
+					snprintf(abuf, sizeof abuf,
+						"LatencyResult signedMs=%+.2f corr=%.3f appliedMs=%.2f ptoRefMs=%+.2f ptoTgtMs=%+.2f ptoDeltaMs=%+.2f motionRMSdeg=%.0f",
+						res.skew_raw_s * 1000.0, res.confidence, res.skew_s * 1000.0,
+						res.ptoRefMean * 1000.0, res.ptoTgtMean * 1000.0, ptoDeltaMs,
+						res.motionRms * 180.0 / EIGEN_PI);
+					Metrics::WriteLogAnnotation(abuf);
 					SaveProfile(ctx);
 				} else {
 					snprintf(lbuf, sizeof lbuf,
@@ -1055,19 +1089,40 @@ void CalibrationTick(double time)
 				if (gotPos) ctx.slamFixDriftPosSq = posSq;
 				if (gotRot) ctx.slamFixDriftRotSq = rotSq;
 				// Anisotropic per-axis scale (the real per-headset drift calibration). Needs
-				// volumetric coverage - axes without enough spread keep their prior value.
-				int scaleAxes = calibration.EstimatePerAxisScale(ctx.slamFixScale);
+				// volumetric coverage - axes without enough spread, or an implausible fit,
+				// keep their prior value (see EstimatePerAxisScale gating).
+				CalibrationCalc::PerAxisScaleDiag sd;
+				int scaleAxes = calibration.EstimatePerAxisScale(ctx.slamFixScale, &sd);
 				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
 				ctx.slamFixWalkActive = false;
 				ctx.slamFixDriftSeeded = ctx.slamFixDriftSeeded || gotPos || gotRot;
-				char dbuf[256];
+				const char* AX = "XYZ";
+				auto axStat = [](int s){ return s == CalibrationCalc::AXIS_ACCEPTED ? "ok"
+					: s == CalibrationCalc::AXIS_LOW_SPREAD ? "low-spread" : "implausible"; };
+				char dbuf[512];
 				snprintf(dbuf, sizeof dbuf,
-					"Drift calibration done: %.1f cm/m, %.2f deg/rad | scale x%.3f y%.3f z%.3f (%d/3 axes)%s\n",
+					"Drift calibration done: %.1f cm/m, %.2f deg/rad | scale x%.3f y%.3f z%.3f (%d/3 axes)%s\n"
+					"  axis fit (n=%d): X rms=%.2fm raw=%.3f [%s] | Y rms=%.2fm raw=%.3f [%s] | Z rms=%.2fm raw=%.3f [%s]\n",
 					std::sqrt(ctx.slamFixDriftPosSq) * 100.0,
 					std::sqrt(ctx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
 					ctx.slamFixScale(0), ctx.slamFixScale(1), ctx.slamFixScale(2), scaleAxes,
-					(gotPos || gotRot || scaleAxes) ? "" : " (insufficient motion - walk a bigger figure-8)");
+					(gotPos || gotRot || scaleAxes) ? "" : " (insufficient motion - walk a bigger figure-8)",
+					sd.nSamples,
+					sd.rmsM[0], sd.rawRatio[0], axStat(sd.status[0]),
+					sd.rmsM[1], sd.rawRatio[1], axStat(sd.status[1]),
+					sd.rmsM[2], sd.rawRatio[2], axStat(sd.status[2]));
 				CalCtx.Log(dbuf);
+				// Persist single-line summary so it survives the session.
+				char abuf[320];
+				snprintf(abuf, sizeof abuf,
+					"DriftResult posCmM=%.2f rotDegRad=%.3f n=%d "
+					"scaleX=%.3f[%s,rms%.2f,raw%.3f] scaleY=%.3f[%s,rms%.2f,raw%.3f] scaleZ=%.3f[%s,rms%.2f,raw%.3f]",
+					std::sqrt(ctx.slamFixDriftPosSq) * 100.0,
+					std::sqrt(ctx.slamFixDriftRotSq) * 180.0 / EIGEN_PI, sd.nSamples,
+					ctx.slamFixScale(0), axStat(sd.status[0]), sd.rmsM[0], sd.rawRatio[0],
+					ctx.slamFixScale(1), axStat(sd.status[1]), sd.rmsM[1], sd.rawRatio[1],
+					ctx.slamFixScale(2), axStat(sd.status[2]), sd.rmsM[2], sd.rawRatio[2]);
+				Metrics::WriteLogAnnotation(abuf);
 				SaveProfile(ctx);
 			}
 		} else if (ctx.slamFixAutoTune) {

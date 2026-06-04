@@ -113,7 +113,7 @@ struct CalibrationContext
 	// devices' angular-speed signals during a brisk yaw head-shake, replacing the
 	// guessed/slider dt_skew with a measured value. One-shot: separate from the
 	// drift walk and from the continuous auto-tuner.
-	struct LatencySample { double t; Eigen::Quaterniond qRef, qTgt; };
+	struct LatencySample { double t; Eigen::Quaterniond qRef, qTgt; double ptoRef, ptoTgt; };
 	bool   slamFixLatencyActive = false;
 	double slamFixLatencyStartTime = 0.0;
 	float  slamFixLatencyDurationS = 6.0f;
