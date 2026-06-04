@@ -1030,11 +1030,18 @@ void CalibrationTick(double time)
 		{
 			const bool tracking = (slamfix_phase == 1) && ok_lp && calibration.isValid();
 			const bool collecting = ctx.slamFixWalkActive || ctx.slamFixAutoTune;
-			if (tracking && collecting) {
-				if (user_lin_speed_r > 0.10)  // m/s, clearly walking
-					ctx.slamFixStructEst.PushPos(meas_pos, user_lin_speed_r * dt);
-				if (user_ang_speed_r > 0.15)  // rad/s, clearly turning
-					ctx.slamFixStructEst.PushRot(meas_rot, user_ang_speed_r * dt);
+			// Translation drift only: sample T_meas during NEAR-PURE TRANSLATION.
+			// T_meas = ref * R_mount * target^-1 is the absolute world offset; while
+			// turning it swings with R_mount error over the lever arm, which is NOT
+			// drift. Requiring low angular speed isolates the genuine random-walk
+			// (validated: gating out rotation collapses a bogus 14 cm/m to ~1-5).
+			// The rotation channel is intentionally NOT fed: rotation correction is
+			// disabled in the filter, and log-space SO(3) differencing is invalid
+			// off-identity anyway (it railed the rot rate to the clamp).
+			if (tracking && collecting &&
+			    user_lin_speed_r > 0.10 &&    // m/s, clearly walking
+			    user_ang_speed_r < 0.20) {    // rad/s, not turning (avoid lever-arm swing)
+				ctx.slamFixStructEst.PushPos(meas_pos, user_lin_speed_r * dt);
 			}
 		}
 
@@ -1123,15 +1130,15 @@ void CalibrationTick(double time)
 			CalCtx.Progress(std::min((int)elapsed, target), target);
 			if (elapsed >= ctx.slamFixWalkDurationS) {
 				double posSq = ctx.slamFixDriftPosSq;
-				double rotSq = ctx.slamFixDriftRotSq;
-				// Structure-function fit on the full walk buffer: slope of the
-				// offset's distance/angle-lagged variance = the drift rate.
-				double fitRstatPos = 0.0, fitR2Pos = 0.0, fitR2Rot = 0.0;
-				double fitSpanPos = 0.0, fitSpanRot = 0.0;
+				// Structure-function fit on the full walk buffer (translation only):
+				// slope of the distance-lagged offset variance = the drift rate.
+				// Rotation drift is NOT auto-estimated (correct_rotation is off and
+				// the SO(3) log-difference estimator was invalid); the rot rate keeps
+				// its loaded / manual value.
+				double fitRstatPos = 0.0, fitR2Pos = 0.0, fitSpanPos = 0.0;
 				bool gotPos = ctx.slamFixStructEst.EstimatePos(posSq, &fitRstatPos, &fitR2Pos, &fitSpanPos);
-				bool gotRot = ctx.slamFixStructEst.EstimateRot(rotSq, &fitR2Rot, &fitSpanRot);
+				bool gotRot = false;
 				if (gotPos) ctx.slamFixDriftPosSq = posSq;
-				if (gotRot) ctx.slamFixDriftRotSq = rotSq;
 				ctx.slamFixStructEst.Reset();
 				ctx.slamFixAutoFitDistPos = 0.0;
 				ctx.slamFixAutoFitAngRot  = 0.0;
@@ -1164,10 +1171,9 @@ void CalibrationTick(double time)
 				// or rejected fit means the walk was too short/jittery to measure.
 				char fbuf[320];
 				snprintf(fbuf, sizeof fbuf,
-					"  drift-fit: pos %s R2=%.3f span=%.1fm Rstatic=%.1fcm | rot %s R2=%.3f span=%.2frad\n",
+					"  drift-fit: pos %s R2=%.3f span=%.1fm Rstatic=%.1fcm (pure-translation samples; rot not auto-estimated)\n",
 					gotPos ? "OK" : "REJECT", fitR2Pos, fitSpanPos,
-					std::sqrt(std::max(0.0, fitRstatPos)) * 100.0,
-					gotRot ? "OK" : "REJECT", fitR2Rot, fitSpanRot);
+					std::sqrt(std::max(0.0, fitRstatPos)) * 100.0);
 				CalCtx.Log(fbuf);
 				// Persist single-line summary so it survives the session.
 				char abuf[320];
@@ -1188,8 +1194,9 @@ void CalibrationTick(double time)
 			// ease the rate toward the new measurement (EMA), so it tracks the
 			// current rig state without snapping on a single noisy window.
 			ctx.slamFixStructEst.TrimToWindow();
-			const double REFIT_M = 5.0, REFIT_RAD = 3.0, AUTO_EMA = 0.3;
+			const double REFIT_M = 5.0, AUTO_EMA = 0.3;
 			bool changed = false;
+			// Translation drift only (pure-translation samples; see feed gate).
 			if (ctx.slamFixStructEst.CumPos() - ctx.slamFixAutoFitDistPos >= REFIT_M) {
 				double np = ctx.slamFixDriftPosSq;
 				if (ctx.slamFixStructEst.EstimatePos(np)) {
@@ -1197,14 +1204,6 @@ void CalibrationTick(double time)
 					changed = true;
 				}
 				ctx.slamFixAutoFitDistPos = ctx.slamFixStructEst.CumPos();
-			}
-			if (ctx.slamFixStructEst.CumRot() - ctx.slamFixAutoFitAngRot >= REFIT_RAD) {
-				double nr = ctx.slamFixDriftRotSq;
-				if (ctx.slamFixStructEst.EstimateRot(nr)) {
-					ctx.slamFixDriftRotSq = (1.0 - AUTO_EMA) * ctx.slamFixDriftRotSq + AUTO_EMA * nr;
-					changed = true;
-				}
-				ctx.slamFixAutoFitAngRot = ctx.slamFixStructEst.CumRot();
 			}
 			if (changed) {
 				// Piggyback on the tuner's windowed cadence: slowly EMA the per-axis scale
