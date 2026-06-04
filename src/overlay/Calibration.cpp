@@ -161,6 +161,50 @@ namespace {
 		return Pose(xform);
 	}
 
+	// --- SLAM time-alignment: reference-pose history + backward interpolation ----
+	// The two streams are read at one wall-clock instant but describe different
+	// physical instants (the streamed SLAM pose is ~dt_skew old). The cross-
+	// correlation gives the relation tgt(t) ~= ref(t - skew) between the recorded
+	// signals. So to pair a target sample read at `now` with a same-instant
+	// reference, we look the reference up at `now - skew` and INTERPOLATE the
+	// buffered history to it (SLERP rot + LERP trans) - never extrapolate forward
+	// along a velocity (the body-frame Exp() de-skew did that and sheared the axes;
+	// see docs/SLAM_TIME_ALIGNMENT.md and the disabled deskew_align path).
+	struct TimedPose { double t; Pose pose; };
+	std::deque<TimedPose> g_refHistory;        // oldest at front, newest at back
+	const double kRefHistoryDepthS = 0.15;     // >> skew clamp [-40, +80] ms
+	const double kRefBracketMaxGapS = 0.05;    // dropped-frame gate (~3-4 ticks)
+
+	void PushRefHistory(double t, const Pose& p) {
+		g_refHistory.push_back({ t, p });
+		while (g_refHistory.size() > 2 && (t - g_refHistory.front().t) > kRefHistoryDepthS)
+			g_refHistory.pop_front();
+	}
+
+	// Interpolate the buffered reference stream to time `t`. Returns false if `t`
+	// predates the buffer or the bracketing samples straddle a dropped-frame gap
+	// (caller then falls back to the raw simultaneous read). `t` past the newest
+	// sample (skew < 0, SLAM leads) clamps to the newest rather than extrapolating.
+	bool InterpolateRef(double t, Pose& out) {
+		if (g_refHistory.size() < 2) return false;
+		if (t <= g_refHistory.front().t) return false;             // not enough history
+		if (t >= g_refHistory.back().t) { out = g_refHistory.back().pose; return true; }
+		size_t i = 0;
+		while (i + 1 < g_refHistory.size() && g_refHistory[i + 1].t <= t) ++i;
+		const TimedPose& a = g_refHistory[i];
+		const TimedPose& b = g_refHistory[i + 1];
+		const double span = b.t - a.t;
+		if (span <= 1e-6) { out = b.pose; return true; }
+		if (span > kRefBracketMaxGapS) return false;               // dropped-frame gate
+		const double u = (t - a.t) / span;
+		Eigen::Quaterniond qa(a.pose.rot), qb(b.pose.rot);
+		qa.normalize(); qb.normalize();
+		Eigen::Quaterniond q = qa.slerp(u, qb); q.normalize();     // SLERP rotation
+		out.rot = q.toRotationMatrix();
+		out.trans = (1.0 - u) * a.pose.trans + u * b.pose.trans;   // LERP translation
+		return true;
+	}
+
 	bool CollectSample(const CalibrationContext& ctx)
 	{
 		vr::DriverPose_t reference, target;
@@ -197,11 +241,29 @@ namespace {
 			reference.vecPosition[2] += ctx.continuousCalibrationOffset.z();
 		}
 
-		calibration.PushSample(Sample(
-			ConvertPose(reference),
-			ConvertPose(target),
-			glfwGetTime()
-		));
+		// Time-align the streams at this single chokepoint (Phase 1+2). Buffer the
+		// reference pose, then pair the target read-now with the reference
+		// interpolated back to the target's true (past) instant `now - dt_skew`.
+		// Every downstream consumer (Kabsch, translation, per-axis scale, EKF
+		// T_meas) then sees simultaneous poses for free. Falls back to the raw
+		// simultaneous read in FAST mode, when skew is negligible, or when history
+		// is too thin / has a dropped-frame gap.
+		const double now = glfwGetTime();
+		Pose refPose = ConvertPose(reference);
+		const Pose tgtPose = ConvertPose(target);
+		PushRefHistory(now, refPose);
+
+		double sampleT = now;
+		const double dtSkew = ctx.slamFixTimeSkew;
+		if (ctx.IsSlamFix() && std::abs(dtSkew) >= 0.001) {
+			Pose aligned;
+			if (InterpolateRef(now - dtSkew, aligned)) {
+				refPose = aligned;
+				sampleT = now - dtSkew;
+			}
+		}
+
+		calibration.PushSample(Sample(refPose, tgtPose, sampleT));
 
 		return true;
 	}
