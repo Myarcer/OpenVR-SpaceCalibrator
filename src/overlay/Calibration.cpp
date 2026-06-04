@@ -170,6 +170,16 @@ namespace {
 	// buffered history to it (SLERP rot + LERP trans) - never extrapolate forward
 	// along a velocity (the body-frame Exp() de-skew did that and sheared the axes;
 	// see docs/SLAM_TIME_ALIGNMENT.md and the disabled deskew_align path).
+	// DISABLED (returning axis tilt). Re-timing only the reference to ref(now-skew)
+	// while pairing it with target(now) gives adjacent Kabsch samples inconsistent
+	// timestamps whenever InterpolateRef falls back (thin history / dropped-frame
+	// gate / pre-buffer -> sampleT reverts to `now`), corrupting the delta-rotation
+	// axis pairs into the X/Z->Y playspace tilt under motion - the same failure
+	// class as the Exp-twist de-skew (DriftFilter deskew_align=false). All
+	// directional time-skew consumption is now off; only the directionless squared
+	// R-inflation (k_skew) remains. Flip to true only with a reworked, gap-free
+	// alignment that re-times BOTH streams consistently. See docs/SLAM_TIME_ALIGNMENT.md.
+	const bool kSlamFixDeskewInterp = false;
 	struct TimedPose { double t; Pose pose; };
 	std::deque<TimedPose> g_refHistory;        // oldest at front, newest at back
 	const double kRefHistoryDepthS = 0.15;     // >> skew clamp [-40, +80] ms
@@ -255,7 +265,7 @@ namespace {
 
 		double sampleT = now;
 		const double dtSkew = ctx.slamFixTimeSkew;
-		if (ctx.IsSlamFix() && std::abs(dtSkew) >= 0.001) {
+		if (kSlamFixDeskewInterp && ctx.IsSlamFix() && std::abs(dtSkew) >= 0.001) {
 			Pose aligned;
 			if (InterpolateRef(now - dtSkew, aligned)) {
 				refPose = aligned;
@@ -1318,9 +1328,19 @@ void CalibrationTick(double time)
 		// SVD is too costly per frame); whether it actually fires is decided
 		// entirely inside SlamFixKabschRecenter by the SAME confidence gate the
 		// FAST/continuous preset uses (variance + absolute error + improvement
-		// over the current EKF state by the contThr margin). So it recenters only
-		// when FAST itself would be certain - not on the timer, not in low motion.
+		// over the current EKF state). So it recenters only when a confident,
+		// fully-observable Kabsch fit exists - not on the timer, not in low motion.
 		// Feeds axis variance to the debug graph so corrections are visible.
+		//
+		// Threshold is forced to 1.0 (FAST's contThr), NOT the SLAM contThr of 2.0:
+		// the EKF blinds its position channel during head rotation (lever-arm
+		// R-inflation), so it coasts on stale prediction and the calibration slides
+		// (observed: ~60cm wander over a SLAM block while error stayed "low" because
+		// it was buffer-relative). Requiring Kabsch to be 2x better than that drifted
+		// state meant the recenter never fired and SLAM never re-centered - flipping
+		// to FAST (contThr=1) snapped instantly. We trust a fresh, confident Kabsch
+		// (gates a: full rotational observability, b: abs RMS < maxRelErr) and snap
+		// to it whenever it merely beats the current state, exactly like FAST does.
 		ctx.slamFixKabschRecenterTicks++;
 		if (ctx.slamFixKabschRecenterTicks >= 100
 			&& calibration.SampleCount() >= 50)
@@ -1328,7 +1348,7 @@ void CalibrationTick(double time)
 			ctx.slamFixKabschRecenterTicks = 0;
 			double axVar = 0.0;
 			if (calibration.SlamFixKabschRecenter(true,
-					CalCtx.EffectiveContinuousCalibrationThreshold(),
+					1.0,   // trust Kabsch: snap when it beats the (possibly drifted) EKF state
 					CalCtx.EffectiveMaxRelativeErrorThreshold(),
 					&axVar)) {
 				ctx.calibratedRotation = calibration.EulerRotation();
