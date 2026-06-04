@@ -54,11 +54,6 @@ public:
     //   user_ang_speed_radps: HMD angular speed (for R inflation, lever arm)
     //   lever_arm_m: scalar magnitude of puck-to-HMD offset (default 0.10m)
     // Returns true if update applied. Always populates innovations.
-    //   hmd_lin_vel_body / hmd_ang_vel_body: SIGNED body-frame HMD velocity
-    //     vectors (m/s, rad/s). When params.deskew_align is set and dt_skew_s is
-    //     non-negligible, T_meas is re-timestamped along this twist by dt_skew_s
-    //     before the residual is formed (directional de-skew, consumes the sign).
-    //     Pass Zero() to disable for this call (falls back to R-inflation only).
     bool Update(const Sophus::SE3d& T_meas,
                 double user_lin_speed_mps,
                 double user_ang_speed_radps,
@@ -67,9 +62,7 @@ public:
                 double *out_innov_rot_rad,
                 double *out_mahalanobis,
                 double *out_nis_pos = nullptr,
-                double *out_nis_rot = nullptr,
-                const Eigen::Vector3d& hmd_lin_vel_body = Eigen::Vector3d::Zero(),
-                const Eigen::Vector3d& hmd_ang_vel_body = Eigen::Vector3d::Zero());
+                double *out_nis_rot = nullptr);
 
     // Current drift transform estimate.
     const Sophus::SE3d& Transform() const { return T_; }
@@ -136,38 +129,9 @@ public:
                                              // (which averages 100-500 samples,
                                              // effectively shrinking sigma by sqrt(N)).
         double k_lever           = 100.0;    // R-inflation gain on (omega*L)^2
-        // Time-skew between reference (lighthouse, low latency) and target
-        // (SLAM, ~10-25ms latency typical for Pico/Quest streamed via
-        // VirtualDesktop/ALVR) creates apparent translational error
-        // proportional to user linear speed. R_pos += k_skew*(v_lin*dt_skew)^2
-        // absorbs this without rejecting samples.
-        double dt_skew_s         = 0.0;      // signed time skew (s); 0 = no motion damping (snappiest).
-                                             // >0 = SLAM lags ref, <0 = SLAM leads. SIGN is now consumed
-                                             // by the Phase-0 de-skew below (T_meas re-timestamped along
-                                             // the body twist); ALSO squared in R-inflation as a residual
-                                             // uncertainty term. See docs/SLAM_TIME_ALIGNMENT.md.
-        // Phase-0 de-skew (timestamp-alignment, first order, EKF measurement only).
-        // When true, Update() advances T_meas along the body-frame HMD twist by
-        // dt_skew_s before forming the residual: T_meas <- T_meas * Exp([v;w]*dt_skew).
-        // This consumes the SIGN of dt_skew_s (a directional correction), unlike the
-        // squared R-inflation term. Gated off when |dt_skew_s| is below the floor or
-        // the caller passes a zero twist (no signed velocity available).
-        // DISABLED: the directional de-skew (T_meas <- T_meas * Exp([v;w]*dt_skew))
-        // re-times along the BODY-frame twist, so its angular term (w) rotated the
-        // measurement and screw-coupled into a cross-axis translation - the X/Z->Y
-        // playspace tilt under motion. Confirmed by elimination: the clean baseline
-        // (no de-skew) had no tilt. The squared R-inflation term (k_skew) is kept;
-        // it only damps measurement confidence and is directionless. Re-enable only
-        // with a linear-only de-skew (zero the angular twist) if revisited.
-        bool   deskew_align      = false;    // master enable for the directional de-skew
-        double deskew_min_skew_s = 0.001;    // below |this| skip de-skew (no measurable gain, only noise)
-        double k_skew            = 100.0;    // R-inflation gain on (v_lin*dt_skew)^2
-        // Rotation R inflation. Lighthouse rotation is fast; SLAM rotation
-        // lags by dt_skew so during a head turn there is a systematic
-        // rotation residual ~ omega*dt_skew that must NOT trigger aggressive
-        // correction. Plus a per-tick term for raw SLAM rotation jitter
-        // that grows during fast rotation (motion blur, feature loss).
-        double k_skew_rot        = 100.0;    // R-inflation gain on (omega*dt_skew)^2 (rad^2)
+        // Rotation R inflation: per-tick term for raw SLAM rotation jitter that
+        // grows during fast rotation (motion blur, feature loss). (The time-skew
+        // R-inflation and directional de-skew were removed - see docs/shelved/.)
         double k_omega_rot       = 1.0e-3;   // R-inflation gain on omega^2 (rad^2 per (rad/s)^2)
 
         double reset_mahal_thresh = 5.0;

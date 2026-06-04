@@ -118,30 +118,11 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas_in,
                          double *out_innov_rot_rad,
                          double *out_mahalanobis,
                          double *out_nis_pos,
-                         double *out_nis_rot,
-                         const Eigen::Vector3d& hmd_lin_vel_body,
-                         const Eigen::Vector3d& hmd_ang_vel_body) {
+                         double *out_nis_rot) {
     if (out_nis_pos) *out_nis_pos = 0.0;
     if (out_nis_rot) *out_nis_rot = 0.0;
 
-    // Phase-0 directional de-skew (timestamp-alignment, first order).
-    // The SLAM (target) pose physically describes an instant dt_skew_s in the
-    // past relative to the lighthouse (reference) pose it was paired with, so
-    // T_meas = ref * R * target^-1 is contaminated by the rig's motion over that
-    // interval. Advance T_meas along the body-frame HMD twist by dt_skew_s to
-    // re-time it to the reference instant: T_meas <- T_meas * Exp([v;w]*dt_skew).
-    // Right-multiplication = body frame (matches Predict's T_ * Exp(v*dt)). This
-    // is what CONSUMES THE SIGN of dt_skew_s (R-inflation only sees its square).
-    // Skipped when disabled, skew is negligible, or no signed twist was supplied.
-    Sophus::SE3d T_meas = T_meas_in;
-    if (params.deskew_align &&
-        std::abs(params.dt_skew_s) >= params.deskew_min_skew_s &&
-        (hmd_lin_vel_body.squaredNorm() + hmd_ang_vel_body.squaredNorm()) > 1e-12) {
-        Vec6 twist;
-        twist.head<3>() = hmd_lin_vel_body;
-        twist.tail<3>() = hmd_ang_vel_body;
-        T_meas = T_meas * Sophus::SE3d::exp(twist * params.dt_skew_s);
-    }
+    const Sophus::SE3d& T_meas = T_meas_in;
 
     // Bootstrap: snap on first measurement.
     if (!initialized_) {
@@ -178,18 +159,12 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas_in,
     Matrix<double, 6, 12> H = Matrix<double, 6, 12>::Zero();
     H.block<6, 6>(0, 0) = Mat6::Identity();
 
-    // R: static + omega*L lever-arm inflation + linear-speed*time-skew inflation
-    // on position channels. The two motion terms add in quadrature because
-    // angular and linear motion are independent error sources.
+    // R: static + omega*L lever-arm inflation on position channels.
     Mat6 R = Mat6::Zero();
     double lever_speed = user_ang_speed_radps * lever_arm_m;             // m/s apparent translation from rotation about offset puck
-    double skew_disp   = user_lin_speed_mps * params.dt_skew_s;          // m apparent offset from time skew (pos)
-    double skew_rot    = user_ang_speed_radps * params.dt_skew_s;        // rad apparent rotation from time skew
     double R_pos_inflated = params.R_static_pos_sq
-                          + params.k_lever * lever_speed * lever_speed
-                          + params.k_skew  * skew_disp   * skew_disp;
+                          + params.k_lever * lever_speed * lever_speed;
     double R_rot_inflated = params.R_static_rot_sq
-                          + params.k_skew_rot  * skew_rot * skew_rot
                           + params.k_omega_rot * user_ang_speed_radps * user_ang_speed_radps;
     for (int i = 0; i < 3; ++i) R(i, i)     = R_pos_inflated;
     for (int i = 3; i < 6; ++i) R(i, i)     = R_rot_inflated;

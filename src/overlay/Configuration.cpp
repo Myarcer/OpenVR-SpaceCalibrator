@@ -201,9 +201,6 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.slamFixDriftRotSq = obj["slam_fix_drift_rot_sq"].get<double>();
 		ctx.slamFixDriftSeeded = true;
 	}
-	if (obj["slam_fix_time_skew"].is<double>()) {
-		ctx.slamFixTimeSkew = obj["slam_fix_time_skew"].get<double>();
-	}
 	// Per-axis SLAM scale gain (anisotropic drift correction).
 		if (obj["slam_fix_scale_x"].is<double>()) ctx.slamFixScale(0) = obj["slam_fix_scale_x"].get<double>();
 		if (obj["slam_fix_scale_y"].is<double>()) ctx.slamFixScale(1) = obj["slam_fix_scale_y"].get<double>();
@@ -334,14 +331,12 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	// the const-ref form, so pass lvalues (rvalue casts hit an undefined T&&).
 	double slamDriftPosSq = ctx.slamFixDriftPosSq;
 	double slamDriftRotSq = ctx.slamFixDriftRotSq;
-	double slamTimeSkew   = ctx.slamFixTimeSkew;
 	double slamLearnGain  = (double)ctx.slamFixTuneLearnGain;
 	double slamMinSamples = (double)ctx.slamFixTuneMinSamples;
 	double slamMadFactor  = (double)ctx.slamFixTuneMadFactor;
 	double slamWalkDur    = (double)ctx.slamFixWalkDurationS;
 	profile["slam_fix_drift_pos_sq"].set<double>(slamDriftPosSq);
 	profile["slam_fix_drift_rot_sq"].set<double>(slamDriftRotSq);
-	profile["slam_fix_time_skew"].set<double>(slamTimeSkew);
 		double slamScaleX = ctx.slamFixScale(0), slamScaleY = ctx.slamFixScale(1), slamScaleZ = ctx.slamFixScale(2);
 		profile["slam_fix_scale_x"].set<double>(slamScaleX);
 		profile["slam_fix_scale_y"].set<double>(slamScaleY);

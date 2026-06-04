@@ -426,11 +426,10 @@ void CCal_DrawSettings() {
 		ImGui::SliderFloat("##slam_walk_dur", &CalCtx.slamFixWalkDurationS, 10.0f, 20.0f, "%.0f");
 		ImGui::PopID();
 
-		// Advanced: manual override of the learned rates + streaming latency.
+		// Advanced: manual override of the learned drift rates.
 		ImGui::BeginGroupPanel("Advanced (manual override)", ImVec2(panel_size.x - 11 * 2, 0));
 		float driftPos = (float)(std::sqrt(CalCtx.slamFixDriftPosSq) * 100.0);   // cm/m
 		float driftRot = (float)(std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI); // deg/rad
-		float skewMs   = (float)(CalCtx.slamFixTimeSkew * 1000.0);
 
 		ImGui::Text("Trans responsiveness (cm/m)");
 		ImGui::SameLine();
@@ -446,15 +445,6 @@ void CCal_DrawSettings() {
 		if (ImGui::SliderFloat("##slam_drift_rot", &driftRot, 0.1f, 5.0f, "%.2f")) {
 			double s = driftRot * EIGEN_PI / 180.0; CalCtx.slamFixDriftRotSq = s * s; changed = true;
 		}
-		ImGui::PopID();
-
-		ImGui::Text("Time skew (ms)");
-		ImGui::SameLine();
-		ImGui::PushID("slam_skew");
-		if (ImGui::SliderFloat("##slam_skew", &skewMs, -40.0f, 80.0f, "%.0f")) {
-			CalCtx.slamFixTimeSkew = skewMs / 1000.0; changed = true;
-		}
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Signed reference<->SLAM latency (VirtualDesktop/ALVR streaming).\n>0 = SLAM lags base stations; <0 = SLAM leads (prediction overshoot).\nInflates measurement noise during motion (used as magnitude for now).");
 		ImGui::PopID();
 		ImGui::EndGroupPanel();
 
@@ -693,26 +683,6 @@ void CCal_BasicInfo() {
 			ImGui::SetTooltip(CalCtx.slamFixDriftSeeded
 				? "Continuously refine the drift rate from the EKF's own innovation\nconsistency while you use VR. Slow and outlier-robust."
 				: "Run 'Calibrate drift' once to seed a per-headset rate first.");
-
-		// --- One-time latency (time-skew) calibration ---
-		const bool shaking = CalCtx.slamFixLatencyActive;
-		ImGui::BeginDisabled(shaking || CalCtx.state != CalibrationState::Continuous);
-		if (shaking) {
-			ImGui::Button("Shaking... keep shaking 'no'");
-		} else if (ImGui::Button("Calibrate latency (shake ~6s)")) {
-			StartSlamLatencyCalibration();
-		}
-		ImGui::EndDisabled();
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Measure the reference<->SLAM streaming latency. When you click,\n"
-				"shake your head left-right ('no') briskly for ~%.0fs. Replaces the\n"
-				"guessed time-skew slider with a measured value.",
-				CalCtx.slamFixLatencyDurationS);
-		if (CalCtx.slamFixLatencyLastMs >= 0.0) {
-			ImGui::SameLine();
-			ImGui::Text("last: %.1f ms (conf %.2f)",
-				CalCtx.slamFixLatencyLastMs, CalCtx.slamFixLatencyLastConf);
-		}
 	}
 
 	// Status field...

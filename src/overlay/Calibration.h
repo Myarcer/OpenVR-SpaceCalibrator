@@ -90,7 +90,6 @@ struct CalibrationContext
 	// the filter's built-in (5cm/m, ~0.01 rad/rad).
 	double slamFixDriftPosSq = 2.5e-3;
 	double slamFixDriftRotSq = 1e-4;
-	double slamFixTimeSkew   = 0.0;     // assumed streaming latency (s); 0 = snappiest (default)
 	// Per-axis SLAM scale gain (x,y,z), measured per-headset over a calibration walk. {1,1,1}
 	// = identity. >1 means PICO over-reports motion along that axis; applied driver-side as a
 	// rigid per-distance rig shift that cancels the anisotropic scale error as you walk.
@@ -116,19 +115,6 @@ struct CalibrationContext
 	DriftStructureEstimator slamFixStructEst;
 	double slamFixAutoFitDistPos = 0.0;   // CumPos() at last auto-tune pos re-fit
 	double slamFixAutoFitAngRot  = 0.0;   // CumRot() at last auto-tune rot re-fit
-
-	// --- One-time latency (time-skew) calibration ---
-	// Measures the reference<->SLAM streaming latency by cross-correlating the two
-	// devices' angular-speed signals during a brisk yaw head-shake, replacing the
-	// guessed/slider dt_skew with a measured value. One-shot: separate from the
-	// drift walk and from the continuous auto-tuner.
-	struct LatencySample { double t; Eigen::Quaterniond qRef, qTgt; double ptoRef, ptoTgt; };
-	bool   slamFixLatencyActive = false;
-	double slamFixLatencyStartTime = 0.0;
-	float  slamFixLatencyDurationS = 6.0f;
-	std::vector<LatencySample> slamFixLatencyBuf;
-	double slamFixLatencyLastMs = -1.0;   // last measured skew (ms), -1 = none this session
-	double slamFixLatencyLastConf = 0.0;  // last measured confidence [0,1]
 
 	float xprev, yprev, zprev;
 
@@ -353,8 +339,7 @@ void StartCalibration();
 void StartContinuousCalibration();
 void EndContinuousCalibration();
 void StartSlamDriftCalibration();   // begin the timed manual drift-rate walk
-void StartSlamLatencyCalibration(); // begin the one-time latency (time-skew) head-shake
-void SlamFixApplyTuning();          // push CalCtx drift rates / time skew into the live filter
+void SlamFixApplyTuning();          // push CalCtx drift rates into the live filter
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 
