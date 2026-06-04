@@ -152,7 +152,14 @@ public:
         // This consumes the SIGN of dt_skew_s (a directional correction), unlike the
         // squared R-inflation term. Gated off when |dt_skew_s| is below the floor or
         // the caller passes a zero twist (no signed velocity available).
-        bool   deskew_align      = true;     // master enable for the directional de-skew
+        // DISABLED: the directional de-skew (T_meas <- T_meas * Exp([v;w]*dt_skew))
+        // re-times along the BODY-frame twist, so its angular term (w) rotated the
+        // measurement and screw-coupled into a cross-axis translation - the X/Z->Y
+        // playspace tilt under motion. Confirmed by elimination: the clean baseline
+        // (no de-skew) had no tilt. The squared R-inflation term (k_skew) is kept;
+        // it only damps measurement confidence and is directionless. Re-enable only
+        // with a linear-only de-skew (zero the angular twist) if revisited.
+        bool   deskew_align      = false;    // master enable for the directional de-skew
         double deskew_min_skew_s = 0.001;    // below |this| skip de-skew (no measurable gain, only noise)
         double k_skew            = 100.0;    // R-inflation gain on (v_lin*dt_skew)^2
         // Rotation R inflation. Lighthouse rotation is fast; SLAM rotation
