@@ -54,6 +54,11 @@ public:
     //   user_ang_speed_radps: HMD angular speed (for R inflation, lever arm)
     //   lever_arm_m: scalar magnitude of puck-to-HMD offset (default 0.10m)
     // Returns true if update applied. Always populates innovations.
+    //   hmd_lin_vel_body / hmd_ang_vel_body: SIGNED body-frame HMD velocity
+    //     vectors (m/s, rad/s). When params.deskew_align is set and dt_skew_s is
+    //     non-negligible, T_meas is re-timestamped along this twist by dt_skew_s
+    //     before the residual is formed (directional de-skew, consumes the sign).
+    //     Pass Zero() to disable for this call (falls back to R-inflation only).
     bool Update(const Sophus::SE3d& T_meas,
                 double user_lin_speed_mps,
                 double user_ang_speed_radps,
@@ -62,7 +67,9 @@ public:
                 double *out_innov_rot_rad,
                 double *out_mahalanobis,
                 double *out_nis_pos = nullptr,
-                double *out_nis_rot = nullptr);
+                double *out_nis_rot = nullptr,
+                const Eigen::Vector3d& hmd_lin_vel_body = Eigen::Vector3d::Zero(),
+                const Eigen::Vector3d& hmd_ang_vel_body = Eigen::Vector3d::Zero());
 
     // Current drift transform estimate.
     const Sophus::SE3d& Transform() const { return T_; }
@@ -135,9 +142,18 @@ public:
         // proportional to user linear speed. R_pos += k_skew*(v_lin*dt_skew)^2
         // absorbs this without rejecting samples.
         double dt_skew_s         = 0.0;      // signed time skew (s); 0 = no motion damping (snappiest).
-                                             // >0 = SLAM lags ref, <0 = SLAM leads. Currently squared
-                                             // in R-inflation below, so the SIGN is informational until
-                                             // a timestamp-alignment use consumes it.
+                                             // >0 = SLAM lags ref, <0 = SLAM leads. SIGN is now consumed
+                                             // by the Phase-0 de-skew below (T_meas re-timestamped along
+                                             // the body twist); ALSO squared in R-inflation as a residual
+                                             // uncertainty term. See docs/SLAM_TIME_ALIGNMENT.md.
+        // Phase-0 de-skew (timestamp-alignment, first order, EKF measurement only).
+        // When true, Update() advances T_meas along the body-frame HMD twist by
+        // dt_skew_s before forming the residual: T_meas <- T_meas * Exp([v;w]*dt_skew).
+        // This consumes the SIGN of dt_skew_s (a directional correction), unlike the
+        // squared R-inflation term. Gated off when |dt_skew_s| is below the floor or
+        // the caller passes a zero twist (no signed velocity available).
+        bool   deskew_align      = true;     // master enable for the directional de-skew
+        double deskew_min_skew_s = 0.001;    // below |this| skip de-skew (no measurable gain, only noise)
         double k_skew            = 100.0;    // R-inflation gain on (v_lin*dt_skew)^2
         // Rotation R inflation. Lighthouse rotation is fast; SLAM rotation
         // lags by dt_skew so during a head turn there is a systematic

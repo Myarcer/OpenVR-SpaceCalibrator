@@ -119,13 +119,18 @@ public:
 	// doesn't pump P; R (measurement noise) uses raw clamped velocities so
 	// inflation reacts immediately at the start of a head turn instead of
 	// lagging by the EMA time constant.
+	// hmd_lin_vel_body / hmd_ang_vel_body: SIGNED body-frame HMD velocity vectors
+	// (m/s, rad/s) used for the Phase-0 directional de-skew of T_meas (consumes the
+	// SIGN of the time skew). Pass Zero() to disable; see docs/SLAM_TIME_ALIGNMENT.md.
 	bool SlamFixDriftStep(double dt,
 		double lin_speed_q_mps, double ang_speed_q_radps,
 		double lin_speed_r_mps, double ang_speed_r_radps,
 		double lever_arm_m,
 		double *innovation_pos_m, double *innovation_rot_rad,
 		double *mahalanobis,
-		double *nis_pos = nullptr, double *nis_rot = nullptr);
+		double *nis_pos = nullptr, double *nis_rot = nullptr,
+		const Eigen::Vector3d& hmd_lin_vel_body = Eigen::Vector3d::Zero(),
+		const Eigen::Vector3d& hmd_ang_vel_body = Eigen::Vector3d::Zero());
 
 	// Self-tuning accessors for the EKF process-noise drift rates.
 	// sigma_lin_pos_sq == (drift_per_meter)^2, sigma_ang_rot_sq == (drift_per_rad)^2.

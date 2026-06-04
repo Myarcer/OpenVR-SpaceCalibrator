@@ -907,6 +907,12 @@ void CalibrationTick(double time)
 			hmdPose.vecAngularVelocity[2]*hmdPose.vecAngularVelocity[2]);
 
 		double fd_lin_speed = 0.0, fd_ang_speed = 0.0;
+		// SIGNED body-frame HMD twist (m/s, rad/s) for the Phase-0 directional
+		// de-skew of T_meas. Lives in the HMD's own (body) frame so it composes by
+		// right-multiplication, matching T_meas * Exp(twist*dt_skew). Zero unless a
+		// valid FD step is available (then de-skew self-disables in DriftFilter).
+		Eigen::Vector3d hmd_lin_vel_body = Eigen::Vector3d::Zero();
+		Eigen::Vector3d hmd_ang_vel_body = Eigen::Vector3d::Zero();
 		if (ctx.slamFixHmdPrevValid && dt > 1e-4) {
 			double dx = hmdPose.vecPosition[0] - ctx.slamFixHmdPrevX;
 			double dy = hmdPose.vecPosition[1] - ctx.slamFixHmdPrevY;
@@ -923,6 +929,15 @@ void CalibrationTick(double time)
 			qDelta.normalize();
 			double dAngle = 2.0 * std::acos(std::min(1.0, std::abs(qDelta.w())));
 			fd_ang_speed = dAngle / dt;
+
+			// Signed vectors in the HMD body frame. World-frame linear delta is
+			// rotated into the body frame by qNow^-1; angular velocity is the
+			// log of the body-frame delta quaternion (already body-relative).
+			Eigen::Vector3d worldLinDelta(dx, dy, dz);
+			hmd_lin_vel_body = (qNow.conjugate() * worldLinDelta) / dt;
+			Eigen::Vector3d axis = qDelta.vec();
+			double axisNorm = axis.norm();
+			if (axisNorm > 1e-9) hmd_ang_vel_body = axis * (dAngle / (axisNorm * dt));
 		}
 		ctx.slamFixHmdPrevX = hmdPose.vecPosition[0];
 		ctx.slamFixHmdPrevY = hmdPose.vecPosition[1];
@@ -944,6 +959,17 @@ void CalibrationTick(double time)
 		const double V_ANG_MAX = 6.0;       // rad/s ~= 343 deg/s - very fast head turn
 		if (user_lin_speed_raw > V_LIN_MAX) user_lin_speed_raw = V_LIN_MAX;
 		if (user_ang_speed_raw > V_ANG_MAX) user_ang_speed_raw = V_ANG_MAX;
+
+		// Clamp the signed de-skew twist by the same human-speed limits (scale the
+		// vector, preserving direction) so a SLAM teleport spike can't produce a
+		// huge bogus de-skew. Zeroed entirely above the cap = de-skew self-disables
+		// for that tick rather than trusting a garbage direction.
+		{
+			double linN = hmd_lin_vel_body.norm();
+			double angN = hmd_ang_vel_body.norm();
+			if (linN > V_LIN_MAX) hmd_lin_vel_body *= (V_LIN_MAX / linN);
+			if (angN > V_ANG_MAX) hmd_ang_vel_body *= (V_ANG_MAX / angN);
+		}
 
 		// EMA smoothing for Q only. alpha=0.3 -> ~3-tick (30ms) time constant.
 		// Single outlier moves EMA by 30% then decays - filter sees a small
@@ -974,7 +1000,8 @@ void CalibrationTick(double time)
 			user_lin_speed_r, user_ang_speed_r,
 			lever_arm_m,
 			&innov_pos, &innov_rot, &mahal,
-			&nis_pos, &nis_rot);
+			&nis_pos, &nis_rot,
+			hmd_lin_vel_body, hmd_ang_vel_body);
 
 		// Phase classification for log:
 		//   0 = bootstrap (filter not yet initialized)

@@ -740,7 +740,8 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 	double lever_arm_m,
 	double *innovation_pos_m, double *innovation_rot_rad,
 	double *mahalanobis,
-	double *nis_pos, double *nis_rot) {
+	double *nis_pos, double *nis_rot,
+	const Eigen::Vector3d& hmd_lin_vel_body, const Eigen::Vector3d& hmd_ang_vel_body) {
 	if (innovation_pos_m) *innovation_pos_m = 0.0;
 	if (innovation_rot_rad) *innovation_rot_rad = 0.0;
 	if (mahalanobis) *mahalanobis = 0.0;
@@ -778,7 +779,8 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 
 	m_driftFilter->Predict(dt, lin_speed_q_mps, ang_speed_q_radps);
 	m_driftFilter->Update(T_meas, lin_speed_r_mps, ang_speed_r_radps, lever_arm_m,
-		innovation_pos_m, innovation_rot_rad, mahalanobis, nis_pos, nis_rot);
+		innovation_pos_m, innovation_rot_rad, mahalanobis, nis_pos, nis_rot,
+		hmd_lin_vel_body, hmd_ang_vel_body);
 
 	// Write posterior into m_estimatedTransformation.
 	const Sophus::SE3d& T_post = m_driftFilter->Transform();

@@ -110,7 +110,7 @@ void DriftFilter::Predict(double dt, double user_lin_speed_mps, double user_ang_
     SymmetrizeP();
 }
 
-bool DriftFilter::Update(const Sophus::SE3d& T_meas,
+bool DriftFilter::Update(const Sophus::SE3d& T_meas_in,
                          double user_lin_speed_mps,
                          double user_ang_speed_radps,
                          double lever_arm_m,
@@ -118,9 +118,30 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
                          double *out_innov_rot_rad,
                          double *out_mahalanobis,
                          double *out_nis_pos,
-                         double *out_nis_rot) {
+                         double *out_nis_rot,
+                         const Eigen::Vector3d& hmd_lin_vel_body,
+                         const Eigen::Vector3d& hmd_ang_vel_body) {
     if (out_nis_pos) *out_nis_pos = 0.0;
     if (out_nis_rot) *out_nis_rot = 0.0;
+
+    // Phase-0 directional de-skew (timestamp-alignment, first order).
+    // The SLAM (target) pose physically describes an instant dt_skew_s in the
+    // past relative to the lighthouse (reference) pose it was paired with, so
+    // T_meas = ref * R * target^-1 is contaminated by the rig's motion over that
+    // interval. Advance T_meas along the body-frame HMD twist by dt_skew_s to
+    // re-time it to the reference instant: T_meas <- T_meas * Exp([v;w]*dt_skew).
+    // Right-multiplication = body frame (matches Predict's T_ * Exp(v*dt)). This
+    // is what CONSUMES THE SIGN of dt_skew_s (R-inflation only sees its square).
+    // Skipped when disabled, skew is negligible, or no signed twist was supplied.
+    Sophus::SE3d T_meas = T_meas_in;
+    if (params.deskew_align &&
+        std::abs(params.dt_skew_s) >= params.deskew_min_skew_s &&
+        (hmd_lin_vel_body.squaredNorm() + hmd_ang_vel_body.squaredNorm()) > 1e-12) {
+        Vec6 twist;
+        twist.head<3>() = hmd_lin_vel_body;
+        twist.tail<3>() = hmd_ang_vel_body;
+        T_meas = T_meas * Sophus::SE3d::exp(twist * params.dt_skew_s);
+    }
 
     // Bootstrap: snap on first measurement.
     if (!initialized_) {
