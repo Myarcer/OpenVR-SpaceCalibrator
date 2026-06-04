@@ -423,6 +423,9 @@ void StartContinuousCalibration() {
 		CalCtx.slamFixTuner.params.learn_gain  = CalCtx.slamFixTuneLearnGain;
 		CalCtx.slamFixTuner.params.min_samples = CalCtx.slamFixTuneMinSamples;
 		CalCtx.slamFixTuner.params.mad_factor  = CalCtx.slamFixTuneMadFactor;
+		CalCtx.slamFixStructEst.Reset();
+		CalCtx.slamFixAutoFitDistPos = 0.0;
+		CalCtx.slamFixAutoFitAngRot  = 0.0;
 
 		// SLAM-Fix params are applied at-read-time via Effective*() accessors.
 		// User profile fields are NOT mutated - switching back to FAST/SLOW/etc
@@ -471,6 +474,9 @@ void StartSlamDriftCalibration() {
 		return;
 	}
 	CalCtx.slamFixTuner.Reset();
+	CalCtx.slamFixStructEst.Reset();
+	CalCtx.slamFixAutoFitDistPos = 0.0;
+	CalCtx.slamFixAutoFitAngRot  = 0.0;
 	// A manual walk is a fresh measurement: reset per-axis scale to identity so axes
 	// this walk does not cover (or that fail the plausibility/spread gate) fall back to
 	// "no correction" instead of inheriting a stale (possibly degenerate) prior.
@@ -995,13 +1001,16 @@ void CalibrationTick(double time)
 
 		double innov_pos = 0.0, innov_rot = 0.0, mahal = 0.0;
 		double nis_pos = 0.0, nis_rot = 0.0;
+		Eigen::Vector3d meas_pos = Eigen::Vector3d::Zero();
+		Eigen::Vector3d meas_rot = Eigen::Vector3d::Zero();
 		bool ok_lp = calibration.SlamFixDriftStep(
 			dt, user_lin_speed_q, user_ang_speed_q,
 			user_lin_speed_r, user_ang_speed_r,
 			lever_arm_m,
 			&innov_pos, &innov_rot, &mahal,
 			&nis_pos, &nis_rot,
-			hmd_lin_vel_body, hmd_ang_vel_body);
+			hmd_lin_vel_body, hmd_ang_vel_body,
+			&meas_pos, &meas_rot);
 
 		// Phase classification for log:
 		//   0 = bootstrap (filter not yet initialized)
@@ -1010,18 +1019,22 @@ void CalibrationTick(double time)
 		int slamfix_phase = 1;
 		if (calibration.SlamFixConsumeResetEvent()) slamfix_phase = 2;
 
-		// --- Self-tuning drift rate ---
-		// Feed per-channel NIS into the tuner. Only steady tracking ticks while
-		// actually moving carry drift information; bootstrap/reset ticks and
-		// stationary ticks are skipped (median + MAD inside the tuner reject the
-		// rest). The walk uses a looser motion gate to gather samples fast.
+		// --- Self-tuning drift rate (structure-function / Allan-variance) ---
+		// Feed the raw measured offset, tagged with the travel since the last fed
+		// tick, into the estimator. It reads the drift rate directly off how the
+		// offset grows with distance (translation) / angle (rotation) - immune to
+		// the Q-vs-R entanglement that railed the old NIS tuner to its floor.
+		// Only steady tracking ticks while clearly moving carry drift information;
+		// stationary / bootstrap / reset ticks are skipped. Fed only while a walk
+		// or auto-tune is active (otherwise the buffer would grow unused).
 		{
 			const bool tracking = (slamfix_phase == 1) && ok_lp && calibration.isValid();
-			const bool lin_moving = user_lin_speed_r > 0.10;  // m/s, clearly walking
-			const bool ang_moving = user_ang_speed_r > 0.15;  // rad/s, clearly turning
-			if (tracking) {
-				ctx.slamFixTuner.PushPos(nis_pos, lin_moving);
-				ctx.slamFixTuner.PushRot(nis_rot, ang_moving);
+			const bool collecting = ctx.slamFixWalkActive || ctx.slamFixAutoTune;
+			if (tracking && collecting) {
+				if (user_lin_speed_r > 0.10)  // m/s, clearly walking
+					ctx.slamFixStructEst.PushPos(meas_pos, user_lin_speed_r * dt);
+				if (user_ang_speed_r > 0.15)  // rad/s, clearly turning
+					ctx.slamFixStructEst.PushRot(meas_rot, user_ang_speed_r * dt);
 			}
 		}
 
@@ -1111,10 +1124,17 @@ void CalibrationTick(double time)
 			if (elapsed >= ctx.slamFixWalkDurationS) {
 				double posSq = ctx.slamFixDriftPosSq;
 				double rotSq = ctx.slamFixDriftRotSq;
-				bool gotPos = ctx.slamFixTuner.SnapPos(posSq);
-				bool gotRot = ctx.slamFixTuner.SnapRot(rotSq);
+				// Structure-function fit on the full walk buffer: slope of the
+				// offset's distance/angle-lagged variance = the drift rate.
+				double fitRstatPos = 0.0, fitR2Pos = 0.0, fitR2Rot = 0.0;
+				double fitSpanPos = 0.0, fitSpanRot = 0.0;
+				bool gotPos = ctx.slamFixStructEst.EstimatePos(posSq, &fitRstatPos, &fitR2Pos, &fitSpanPos);
+				bool gotRot = ctx.slamFixStructEst.EstimateRot(rotSq, &fitR2Rot, &fitSpanRot);
 				if (gotPos) ctx.slamFixDriftPosSq = posSq;
 				if (gotRot) ctx.slamFixDriftRotSq = rotSq;
+				ctx.slamFixStructEst.Reset();
+				ctx.slamFixAutoFitDistPos = 0.0;
+				ctx.slamFixAutoFitAngRot  = 0.0;
 				// Anisotropic per-axis scale (the real per-headset drift calibration). Needs
 				// volumetric coverage - axes without enough spread, or an implausible fit,
 				// keep their prior value (see EstimatePerAxisScale gating).
@@ -1139,6 +1159,16 @@ void CalibrationTick(double time)
 					sd.rmsM[1], sd.rawRatio[1], axStat(sd.status[1]),
 					sd.rmsM[2], sd.rawRatio[2], axStat(sd.status[2]));
 				CalCtx.Log(dbuf);
+				// Structure-function fit diagnostics: R^2 ~ 1 confirms a clean
+				// distance-random-walk (the drift rate is trustworthy); a low R^2
+				// or rejected fit means the walk was too short/jittery to measure.
+				char fbuf[320];
+				snprintf(fbuf, sizeof fbuf,
+					"  drift-fit: pos %s R2=%.3f span=%.1fm Rstatic=%.1fcm | rot %s R2=%.3f span=%.2frad\n",
+					gotPos ? "OK" : "REJECT", fitR2Pos, fitSpanPos,
+					std::sqrt(std::max(0.0, fitRstatPos)) * 100.0,
+					gotRot ? "OK" : "REJECT", fitR2Rot, fitSpanRot);
+				CalCtx.Log(fbuf);
 				// Persist single-line summary so it survives the session.
 				char abuf[320];
 				snprintf(abuf, sizeof abuf,
@@ -1153,13 +1183,29 @@ void CalibrationTick(double time)
 				SaveProfile(ctx);
 			}
 		} else if (ctx.slamFixAutoTune) {
-			// Continuous slow refinement. Each call fires only once a window of
-			// samples is collected (min_samples), then nudges the rate slightly.
-			double posSq = ctx.slamFixDriftPosSq;
-			double rotSq = ctx.slamFixDriftRotSq;
+			// Continuous refinement on a sliding distance/angle window. Re-fit the
+			// structure function every few metres / radians of fresh travel and
+			// ease the rate toward the new measurement (EMA), so it tracks the
+			// current rig state without snapping on a single noisy window.
+			ctx.slamFixStructEst.TrimToWindow();
+			const double REFIT_M = 5.0, REFIT_RAD = 3.0, AUTO_EMA = 0.3;
 			bool changed = false;
-			if (ctx.slamFixTuner.MaybeApplyPos(posSq)) { ctx.slamFixDriftPosSq = posSq; changed = true; }
-			if (ctx.slamFixTuner.MaybeApplyRot(rotSq)) { ctx.slamFixDriftRotSq = rotSq; changed = true; }
+			if (ctx.slamFixStructEst.CumPos() - ctx.slamFixAutoFitDistPos >= REFIT_M) {
+				double np = ctx.slamFixDriftPosSq;
+				if (ctx.slamFixStructEst.EstimatePos(np)) {
+					ctx.slamFixDriftPosSq = (1.0 - AUTO_EMA) * ctx.slamFixDriftPosSq + AUTO_EMA * np;
+					changed = true;
+				}
+				ctx.slamFixAutoFitDistPos = ctx.slamFixStructEst.CumPos();
+			}
+			if (ctx.slamFixStructEst.CumRot() - ctx.slamFixAutoFitAngRot >= REFIT_RAD) {
+				double nr = ctx.slamFixDriftRotSq;
+				if (ctx.slamFixStructEst.EstimateRot(nr)) {
+					ctx.slamFixDriftRotSq = (1.0 - AUTO_EMA) * ctx.slamFixDriftRotSq + AUTO_EMA * nr;
+					changed = true;
+				}
+				ctx.slamFixAutoFitAngRot = ctx.slamFixStructEst.CumRot();
+			}
 			if (changed) {
 				// Piggyback on the tuner's windowed cadence: slowly EMA the per-axis scale
 				// toward the current buffer fit (observable axes only). Keeps scale converging

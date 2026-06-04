@@ -741,7 +741,8 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 	double *innovation_pos_m, double *innovation_rot_rad,
 	double *mahalanobis,
 	double *nis_pos, double *nis_rot,
-	const Eigen::Vector3d& hmd_lin_vel_body, const Eigen::Vector3d& hmd_ang_vel_body) {
+	const Eigen::Vector3d& hmd_lin_vel_body, const Eigen::Vector3d& hmd_ang_vel_body,
+	Eigen::Vector3d *out_meas_pos, Eigen::Vector3d *out_meas_rot) {
 	if (innovation_pos_m) *innovation_pos_m = 0.0;
 	if (innovation_rot_rad) *innovation_rot_rad = 0.0;
 	if (mahalanobis) *mahalanobis = 0.0;
@@ -763,6 +764,12 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 	Eigen::Quaterniond q_meas(Tmeas_aff.rotation());
 	q_meas.normalize();
 	Sophus::SE3d T_meas(q_meas, Tmeas_aff.translation());
+
+	// Raw measured offset for the structure-function drift estimator. This is the
+	// pre-filter measurement (NOT the EKF posterior, which is already smoothed by
+	// the current - possibly wrong - drift rate; using it would be circular).
+	if (out_meas_pos) *out_meas_pos = T_meas.translation();
+	if (out_meas_rot) *out_meas_rot = T_meas.so3().log();
 
 	// Bootstrap-into-tracking: snap on first valid measurement.
 	if (!m_isValid) {

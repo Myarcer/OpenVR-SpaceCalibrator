@@ -130,7 +130,12 @@ public:
 		double *mahalanobis,
 		double *nis_pos = nullptr, double *nis_rot = nullptr,
 		const Eigen::Vector3d& hmd_lin_vel_body = Eigen::Vector3d::Zero(),
-		const Eigen::Vector3d& hmd_ang_vel_body = Eigen::Vector3d::Zero());
+		const Eigen::Vector3d& hmd_ang_vel_body = Eigen::Vector3d::Zero(),
+		// Raw (de-skewed) measured offset for the structure-function drift
+		// estimator: translation (m) and rotation log-vector (rad). Written on
+		// every valid tracking tick (not on bootstrap / early-out).
+		Eigen::Vector3d *out_meas_pos = nullptr,
+		Eigen::Vector3d *out_meas_rot = nullptr);
 
 	// Self-tuning accessors for the EKF process-noise drift rates.
 	// sigma_lin_pos_sq == (drift_per_meter)^2, sigma_ang_rot_sq == (drift_per_rad)^2.

@@ -9,6 +9,7 @@
 
 #include "Protocol.h"
 #include "DriftRateTuner.h"
+#include "DriftStructureEstimator.h"
 
 enum class CalibrationState
 {
@@ -106,7 +107,15 @@ struct CalibrationContext
 	// collection + snap-on-completion instead of slow auto refinement.
 	bool   slamFixWalkActive = false;
 	double slamFixWalkStartTime = 0.0;
-	DriftRateTuner slamFixTuner;
+	DriftRateTuner slamFixTuner;   // legacy NIS tuner (retained; no longer applied)
+
+	// Structure-function (Allan-variance) drift-rate estimator. Reads the drift
+	// rate directly off the measured offset's growth vs walked distance / angle.
+	// Drives BOTH the manual walk (full-buffer fit on completion) and the
+	// continuous auto-tune (sliding-window re-fit every few metres).
+	DriftStructureEstimator slamFixStructEst;
+	double slamFixAutoFitDistPos = 0.0;   // CumPos() at last auto-tune pos re-fit
+	double slamFixAutoFitAngRot  = 0.0;   // CumRot() at last auto-tune rot re-fit
 
 	// --- One-time latency (time-skew) calibration ---
 	// Measures the reference<->SLAM streaming latency by cross-correlating the two
