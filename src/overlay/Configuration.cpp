@@ -195,11 +195,16 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	// SLAM-Fix self-tuning drift rate (learned + auto-tuner controls).
 	if (obj["slam_fix_drift_pos_sq"].is<double>()) {
 		ctx.slamFixDriftPosSq = obj["slam_fix_drift_pos_sq"].get<double>();
-		ctx.slamFixDriftSeeded = true;
 	}
 	if (obj["slam_fix_drift_rot_sq"].is<double>()) {
 		ctx.slamFixDriftRotSq = obj["slam_fix_drift_rot_sq"].get<double>();
-		ctx.slamFixDriftSeeded = true;
+	}
+	// "Seeded" = this headset has a REAL learned calibration (an accepted walk or
+	// auto-tune fit). Persisted explicitly and used to auto-enable auto-tune on
+	// startup. Must NOT be inferred from the drift keys merely existing - they are
+	// always written (at default), which falsely marked every fresh profile seeded.
+	if (obj["slam_fix_drift_seeded"].is<bool>()) {
+		ctx.slamFixDriftSeeded = obj["slam_fix_drift_seeded"].get<bool>();
 	}
 	// Per-axis SLAM scale gain (anisotropic drift correction).
 		if (obj["slam_fix_scale_x"].is<double>()) ctx.slamFixScale(0) = obj["slam_fix_scale_x"].get<double>();
@@ -337,6 +342,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	double slamWalkDur    = (double)ctx.slamFixWalkDurationS;
 	profile["slam_fix_drift_pos_sq"].set<double>(slamDriftPosSq);
 	profile["slam_fix_drift_rot_sq"].set<double>(slamDriftRotSq);
+	profile["slam_fix_drift_seeded"].set<bool>(ctx.slamFixDriftSeeded);
 		double slamScaleX = ctx.slamFixScale(0), slamScaleY = ctx.slamFixScale(1), slamScaleZ = ctx.slamFixScale(2);
 		profile["slam_fix_scale_x"].set<double>(slamScaleX);
 		profile["slam_fix_scale_y"].set<double>(slamScaleY);

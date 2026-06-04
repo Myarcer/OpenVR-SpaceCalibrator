@@ -426,6 +426,16 @@ void StartContinuousCalibration() {
 		CalCtx.slamFixAutoFitDistPos = 0.0;
 		CalCtx.slamFixAutoFitAngRot  = 0.0;
 
+		// User-friendly startup: if this headset was already calibrated in a prior
+		// session (seed persisted), turn the continuous auto-tuner ON automatically -
+		// no manual re-walk + re-press every launch. The per-headset scale/drift load
+		// from profile; the session origin (which re-establishes each boot) is
+		// re-acquired automatically by the Kabsch recenter as soon as the user moves.
+		if (CalCtx.slamFixDriftSeeded && !CalCtx.slamFixAutoTune) {
+			CalCtx.slamFixAutoTune = true;
+			CalCtx.Log("SLAM-Fix: auto-tune ON (headset already calibrated; walk a few seconds to re-center)\n");
+		}
+
 		// SLAM-Fix params are applied at-read-time via Effective*() accessors.
 		// User profile fields are NOT mutated - switching back to FAST/SLOW/etc
 		// restores the user's saved values.
@@ -475,10 +485,12 @@ void StartSlamDriftCalibration() {
 	CalCtx.slamFixStructEst.Reset();
 	CalCtx.slamFixAutoFitDistPos = 0.0;
 	CalCtx.slamFixAutoFitAngRot  = 0.0;
-	// A manual walk is a fresh measurement: reset per-axis scale to identity so axes
-	// this walk does not cover (or that fail the plausibility/spread gate) fall back to
-	// "no correction" instead of inheriting a stale (possibly degenerate) prior.
-	CalCtx.slamFixScale = Eigen::Vector3d::Ones();
+	// A manual walk REFINES the existing per-axis scale: keep the loaded/prior value
+	// and let EstimatePerAxisScale overwrite only the axes this walk covers well
+	// (uncovered / gate-failing axes keep their prior). Do NOT reset to identity here
+	// - that destroyed a good persisted scale on every re-walk that didn't re-cover an
+	// axis (Y is near-impossible to cover by walking), which is why the saved profile
+	// kept reverting to 1,1,1.
 	CalCtx.slamFixWalkStartTime = 0.0;  // initialized on first tick (like slamFixLastTickTime)
 	CalCtx.slamFixWalkActive = true;
 	CalCtx.ClearLogOnMessage();
@@ -878,7 +890,18 @@ void CalibrationTick(double time)
 				int scaleAxes = calibration.EstimatePerAxisScale(ctx.slamFixScale, &sd);
 				calibration.SlamFixSetDriftRates(ctx.slamFixDriftPosSq, ctx.slamFixDriftRotSq);
 				ctx.slamFixWalkActive = false;
-				ctx.slamFixDriftSeeded = ctx.slamFixDriftSeeded || gotPos || gotRot;
+				// "Accepted" = this walk actually learned something (a drift-rate fit
+				// or at least one per-axis scale). Only then do we mark the headset
+				// seeded; a rejected walk keeps the prior calibration untouched.
+				const bool accepted = gotPos || gotRot || (scaleAxes > 0);
+				ctx.slamFixDriftSeeded = ctx.slamFixDriftSeeded || accepted;
+				// A successful calibration walk auto-enables the continuous auto-tuner
+				// so the user never has to separately press it (the annoying second
+				// step). Persisted below, so future sessions start with it on.
+				if (accepted && !ctx.slamFixAutoTune) {
+					ctx.slamFixAutoTune = true;
+					CalCtx.Log("Auto-tune enabled automatically (calibration accepted).\n");
+				}
 				const char* AX = "XYZ";
 				auto axStat = [](int s){ return s == CalibrationCalc::AXIS_ACCEPTED ? "ok"
 					: s == CalibrationCalc::AXIS_LOW_SPREAD ? "low-spread" : "implausible"; };
@@ -904,6 +927,12 @@ void CalibrationTick(double time)
 					gotPos ? "OK" : "REJECT", fitR2Pos, fitSpanPos,
 					std::sqrt(std::max(0.0, fitRstatPos)) * 100.0);
 				CalCtx.Log(fbuf);
+				// Unambiguous seeded verdict so the user knows whether this walk
+				// actually calibrated the headset (and thus survives restart).
+				if (accepted)
+					CalCtx.Log(">> SEEDED: calibration saved - future startups auto-apply it + auto-tune.\n");
+				else
+					CalCtx.Log(">> NOT SEEDED: walk too small/jittery. Previous calibration kept. Walk a bigger, slower figure-8 covering the whole room.\n");
 				// Persist single-line summary so it survives the session.
 				char abuf[320];
 				snprintf(abuf, sizeof abuf,
