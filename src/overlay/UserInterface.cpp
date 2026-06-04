@@ -359,10 +359,27 @@ void CCal_DrawSettings() {
 		}
 
 		{
-			// Playspace offset
+			// Playspace scale. In SLAM-Fix mode the uniform calibratedScale is dead
+			// (overwritten at send time by the per-axis slamFixScale), so show the live
+			// per-axis values read-only instead of a knob that does nothing.
 			ImVec2 panel_size_inner{ panel_size.x - 11 * 2, 0 };
 			ImGui::BeginGroupPanel("Playspace scale", panel_size_inner);
-			DrawVectorElement("cc_playspace_scale", "PLayspace Scale", &CalCtx.calibratedScale, 1, " 1 ");
+			if (CalCtx.IsSlamFix()) {
+				bool identity = (CalCtx.slamFixScale - Eigen::Vector3d::Ones()).norm() < 1e-4;
+				ImGui::Text("X %.4f   Y %.4f   Z %.4f%s",
+					CalCtx.slamFixScale(0), CalCtx.slamFixScale(1), CalCtx.slamFixScale(2),
+					identity ? "  (not yet calibrated)" : "");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Per-axis walking-scale correction, learned by SLAM-Fix.\n"
+						"How much your headset over- or under-reports the distance you\n"
+						"actually walk, separately for left/right (X), up/down (Y) and\n"
+						"forward/back (Z). 1.000 = perfect. 1.030 = headset thinks you\n"
+						"moved 3%% farther than you did, so SpaceCalibrator pulls it back.\n"
+						"Set automatically by 'Calibrate drift' and 'Auto-tune' \xE2\x80\x94 not edited here.");
+			} else {
+				DrawVectorElement("cc_playspace_scale", "Playspace Scale", &CalCtx.calibratedScale, 1, " 1 ");
+			}
 			ImGui::EndGroupPanel();
 		}
 
@@ -627,9 +644,30 @@ void CCal_BasicInfo() {
 			std::sqrt(CalCtx.slamFixDriftPosSq) * 100.0,
 			std::sqrt(CalCtx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
 			CalCtx.slamFixDriftSeeded ? "" : "  (default - not yet calibrated)");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(
+				"How fast tracking randomly wanders, NOT a fixed scale error.\n\n"
+				"cm/m: for every metre you walk, the position estimate drifts\n"
+				"  this many centimetres in a random direction. Lower = steadier.\n"
+				"deg/rad: same idea for rotation \xE2\x80\x94 degrees of heading drift per\n"
+				"  radian you turn.\n\n"
+				"This feeds the filter's trust in the tracker (process noise). It is\n"
+				"separate from the per-axis Scale below: drift is random jitter that\n"
+				"grows with distance; scale is a steady over/under-reporting you can\n"
+				"cancel out exactly.");
 		ImGui::Text("Scale (per-axis): x%.3f  y%.3f  z%.3f%s",
 			CalCtx.slamFixScale(0), CalCtx.slamFixScale(1), CalCtx.slamFixScale(2),
 			(CalCtx.slamFixScale - Eigen::Vector3d::Ones()).norm() < 1e-4 ? "  (identity - run Calibrate drift)" : "");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(
+				"Per-axis walking-scale correction (X = left/right, Y = up/down,\n"
+				"Z = forward/back).\n\n"
+				"How much the headset over- or under-reports the distance you\n"
+				"actually move along each axis. 1.000 = perfect. 1.030 means it\n"
+				"thinks you moved 3%% farther than you did, so SpaceCalibrator\n"
+				"shrinks that axis back to real-world distance.\n\n"
+				"Unlike the drift rate above (random wander), this is a steady\n"
+				"systematic error \xE2\x80\x94 set by 'Calibrate drift' and refined by 'Auto-tune'.");
 
 		const bool walking = CalCtx.slamFixWalkActive;
 		ImGui::BeginDisabled(walking || CalCtx.state != CalibrationState::Continuous);
