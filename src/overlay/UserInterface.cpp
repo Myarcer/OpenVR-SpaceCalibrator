@@ -668,9 +668,11 @@ void CCal_BasicInfo() {
 		}
 		ImGui::EndDisabled();
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Measure this headset's drift rate. When you click, walk\n"
-				"straight back-and-forth across your room for ~%.0fs. Straight\n"
-				"lines give the cleanest signal; head turns sample rotation drift.",
+			ImGui::SetTooltip("Measure this headset's drift rate + per-axis scale. When you\n"
+				"click, walk STRAIGHT back-and-forth across your room for ~%.0fs,\n"
+				"a few metres each way, in two perpendicular directions (covers X\n"
+				"and Z scale). Straight lines give the cleanest signal - the drift\n"
+				"fit ignores samples while you're turning, so keep turns at the ends.",
 				CalCtx.slamFixWalkDurationS);
 
 		ImGui::SameLine();

@@ -494,7 +494,7 @@ void StartSlamDriftCalibration() {
 	CalCtx.slamFixWalkStartTime = 0.0;  // initialized on first tick (like slamFixLastTickTime)
 	CalCtx.slamFixWalkActive = true;
 	CalCtx.ClearLogOnMessage();
-	CalCtx.Log("Drift calibration: walk a figure-8 covering the room (all axes) for the scale fit.\n");
+	CalCtx.Log("Drift calibration: walk STRAIGHT back-and-forth across the room (a few metres each way), in two perpendicular directions. Keep turns at the ends only - the drift fit ignores samples while you're turning.\n");
 	Metrics::WriteLogAnnotation("StartSlamDriftCalibration");
 }
 
@@ -912,7 +912,7 @@ void CalibrationTick(double time)
 					std::sqrt(ctx.slamFixDriftPosSq) * 100.0,
 					std::sqrt(ctx.slamFixDriftRotSq) * 180.0 / EIGEN_PI,
 					ctx.slamFixScale(0), ctx.slamFixScale(1), ctx.slamFixScale(2), scaleAxes,
-					(gotPos || gotRot || scaleAxes) ? "" : " (insufficient motion - walk a bigger figure-8)",
+					(gotPos || gotRot || scaleAxes) ? "" : " (insufficient motion - walk straight, further, without turning)",
 					sd.nSamples,
 					sd.rmsM[0], sd.rawRatio[0], axStat(sd.status[0]),
 					sd.rmsM[1], sd.rawRatio[1], axStat(sd.status[1]),
@@ -932,7 +932,7 @@ void CalibrationTick(double time)
 				if (accepted)
 					CalCtx.Log(">> SEEDED: calibration saved - future startups auto-apply it + auto-tune.\n");
 				else
-					CalCtx.Log(">> NOT SEEDED: walk too small/jittery. Previous calibration kept. Walk a bigger, slower figure-8 covering the whole room.\n");
+					CalCtx.Log(">> NOT SEEDED: walk too small/jittery. Previous calibration kept. Walk STRAIGHT back-and-forth, further (a few metres each way) and slower, in two perpendicular directions - minimise turning.\n");
 				// Persist single-line summary so it survives the session.
 				char abuf[320];
 				snprintf(abuf, sizeof abuf,
