@@ -380,11 +380,22 @@ int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale, PerAxisScaleDi
 	if (n < MIN_SAMPLES) return 0;
 	refMean /= (double)n; tgtMean /= (double)n;
 
+	// FRAME ALIGNMENT (critical): ref (Pico HMD) and target (lighthouse) samples
+	// live in DIFFERENT, yaw-offset tracking frames. Comparing their per-axis
+	// variance raw mixes axes - a walk along one physical axis lands on different
+	// array axes in each frame, so the per-axis ratio is garbage (symptom: X/Z raw
+	// ratios swing wildly between runs while yaw-invariant Y stays stable). Rotate
+	// the target displacement into the reference frame via the calibration rotation
+	// first, so Srr and Stt are expressed on the SAME axes - the reference/world
+	// frame, which is also the frame the driver applies the per-axis gain in.
+	const Eigen::Matrix3d Rcal = m_isValid
+		? m_estimatedTransformation.rotation()
+		: Eigen::Matrix3d::Identity();
 	Eigen::Vector3d Srr = Eigen::Vector3d::Zero(), Stt = Eigen::Vector3d::Zero();
 	for (const auto& s : m_samples) {
 		if (!s.valid) continue;
 		Eigen::Vector3d dr = s.ref.trans - refMean;
-		Eigen::Vector3d dt = s.target.trans - tgtMean;
+		Eigen::Vector3d dt = Rcal * (s.target.trans - tgtMean);
 		for (int a = 0; a < 3; ++a) { Srr(a) += dr(a) * dr(a); Stt(a) += dt(a) * dt(a); }
 	}
 
