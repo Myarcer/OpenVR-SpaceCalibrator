@@ -83,15 +83,6 @@ struct CalibrationContext
 	// validation gate quality. Translation-only fallback when variance is low.
 	int slamFixKabschRecenterTicks = 0;
 
-	// Consecutive low-angular-speed ticks. The recenter re-fits an ABSOLUTE
-	// center from the sample buffer; during head rotation the lever-arm corrupts
-	// every sample, so a re-fit then snaps to garbage (observed: errC 12->132mm
-	// over a window of small head turns). Only recenter after the buffer has had
-	// time to fill with rotation-clean samples. Gated on angular speed ONLY -
-	// straight walking (low omega, high lin) stays eligible so walk-drift still
-	// re-centers; head turns reset the streak.
-	int slamFixCalmTicks = 0;
-
 	// --- SLAM-Fix self-tuning drift rate ---
 	// Learned EKF process-noise (variances). sigma_lin_pos_sq == (drift_per_meter)^2,
 	// sigma_ang_rot_sq == (drift_per_rad)^2. Persisted; pushed into the filter at

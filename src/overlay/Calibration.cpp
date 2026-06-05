@@ -809,13 +809,6 @@ void CalibrationTick(double time)
 		double user_lin_speed_r = user_lin_speed_raw;
 		double user_ang_speed_r = user_ang_speed_raw;
 
-		// Calm streak for the recenter gate: count consecutive low-rotation ticks.
-		// A head turn (lever-arm corrupts the buffer) resets it; only sustained
-		// rotational calm lets the buffer flush to clean samples before a re-fit.
-		const double RECENTER_ANG_GATE = 0.30;  // rad/s (~17 deg/s) = clearly rotating
-		if (user_ang_speed_r > RECENTER_ANG_GATE) ctx.slamFixCalmTicks = 0;
-		else                                      ctx.slamFixCalmTicks++;
-
 		// Lever arm: actual puck-to-HMD offset magnitude from the locked R_mount
 		// (was a hardcoded 0.10). The R-inflation that freezes position during a
 		// head turn must match the true geometry or rotation leaks into the
@@ -1036,16 +1029,8 @@ void CalibrationTick(double time)
 		// (gates a: full rotational observability, b: abs RMS < maxRelErr) and snap
 		// to it whenever it merely beats the current state, exactly like FAST does.
 		ctx.slamFixKabschRecenterTicks++;
-		// Rotational-calm gate: a recenter re-fits an absolute center from the
-		// buffer, so it must NOT run while the buffer still holds rotation-corrupted
-		// (lever-arm) samples. Require ~1.5s of sustained low angular speed so the
-		// ~200-sample buffer has flushed to clean samples first. This stops the
-		// "fires on every small head turn and uncenters" behaviour while leaving
-		// straight-walk recentering intact (walking keeps omega low).
-		const int RECENTER_CALM_REQUIRED = 90;   // ticks (~1.5s) of rotational calm
 		double recenterFired = 0.0;
 		if (ctx.slamFixKabschRecenterTicks >= 100
-			&& ctx.slamFixCalmTicks >= RECENTER_CALM_REQUIRED
 			&& calibration.SampleCount() >= 50)
 		{
 			ctx.slamFixKabschRecenterTicks = 0;

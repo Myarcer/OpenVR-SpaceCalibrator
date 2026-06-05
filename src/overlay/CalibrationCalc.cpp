@@ -886,15 +886,17 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 	double axisVar = ComputeAxisVariance(kabschCal)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
 
-	const double FULL_KABSCH_THRESH = 0.01;
-	const bool fullObservable = (axisVar >= FULL_KABSCH_THRESH);
-
-	Eigen::AffineCompact3d cand;
-	if (fullObservable) {
-		cand = kabschCal;
-	} else if (!CalibrateByRelPose(cand)) {
-		return false;
-	}
+	// FAST-preset baseline: only re-center when rotation is OBSERVABLE, then
+	// re-solve rotation+translation via full Kabsch - exactly what the FAST
+	// continuous preset does (ComputeIncremental's accept gate uses the same
+	// AxisVarianceThreshold). FAST "waits until it has enough data" = it waits for
+	// this rotational variance, so small head movements (low variance) are never
+	// re-centered. The previous locked-R translation-only fallback (commit 556310c)
+	// had NO variance requirement, so it fired on rotation-corrupted buffers during
+	// small head turns and snapped the center to garbage (observed errC 12->132mm).
+	if (axisVar < AxisVarianceThreshold) return false;
+	const bool fullObservable = true;
+	Eigen::AffineCompact3d cand = kabschCal;
 
 	// (b) Absolute error gate: the candidate fit must itself be good.
 	const auto posOffset = ComputeRefToTargetOffset(cand);
