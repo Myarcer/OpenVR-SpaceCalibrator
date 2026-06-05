@@ -676,15 +676,16 @@ void CCal_BasicInfo() {
 				CalCtx.slamFixWalkDurationS);
 
 		ImGui::SameLine();
-		ImGui::BeginDisabled(!CalCtx.slamFixDriftSeeded);
+		// Auto-tune no longer requires a prior 'Calibrate drift' seed: it refines
+		// the drift rate from the EKF's own innovation consistency, which works
+		// from the default rate too. Enabling it directly is a valid path.
 		if (ImGui::Checkbox("Auto-tune drift", &CalCtx.slamFixAutoTune)) {
 			SaveProfile(CalCtx);
 		}
-		ImGui::EndDisabled();
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip(CalCtx.slamFixDriftSeeded
-				? "Continuously refine the drift rate from the EKF's own innovation\nconsistency while you use VR. Slow and outlier-robust."
-				: "Run 'Calibrate drift' once to seed a per-headset rate first.");
+			ImGui::SetTooltip("Continuously refine the drift rate from the EKF's own innovation\n"
+				"consistency while you use VR. Slow and outlier-robust. Works without\n"
+				"running 'Calibrate drift' first (starts from the default rate).");
 	}
 
 	// Status field...

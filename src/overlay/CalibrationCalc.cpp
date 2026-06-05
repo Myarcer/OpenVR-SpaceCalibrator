@@ -388,7 +388,11 @@ int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale, PerAxisScaleDi
 		for (int a = 0; a < 3; ++a) { Srr(a) += dr(a) * dr(a); Stt(a) += dt(a) * dt(a); }
 	}
 
-	const double MIN_RMS   = 0.40;   // (2) m RMS along axis (~+/-0.6m) for scale to be observable
+	const double MIN_RMS   = 0.25;   // (2) m RMS along axis (~+/-0.35m) for scale to be observable.
+	                                 // Lowered from 0.40 (~+/-0.6m) so a normal room-scale
+	                                 // walk seeds X/Z; the +/-10% plausibility band below still
+	                                 // rejects noise-railed fits, so a smaller walk can't push a
+	                                 // bad scale into the profile.
 	const double PLAUS_LO  = 0.90;   // (3) reject fits implying >10% scale error as artifacts
 	const double PLAUS_HI  = 1.10;
 	int updated = 0;
