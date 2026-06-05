@@ -27,6 +27,7 @@ namespace Metrics {
 	TimeSeries<double> slamfix_v_lin_mm_s;
 	TimeSeries<double> slamfix_v_ang_deg_s;
 	TimeSeries<double> slamfix_mahal;
+	TimeSeries<double> slamfix_corr_ramp;
 
 	// https://stackoverflow.com/a/17827724
 	bool IsBrowsePath(const std::wstring& path)
@@ -155,7 +156,8 @@ namespace Metrics {
 		TS_FIELD(slamfix_innov_rot_deg),
 		TS_FIELD(slamfix_v_lin_mm_s),
 		TS_FIELD(slamfix_v_ang_deg_s),
-		TS_FIELD(slamfix_mahal)
+		TS_FIELD(slamfix_mahal),
+		TS_FIELD(slamfix_corr_ramp)
 	};
 	
 	

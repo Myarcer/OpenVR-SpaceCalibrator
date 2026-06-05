@@ -155,6 +155,10 @@ double CalibrationCalc::SlamFixLastMahalanobis() const {
 	return m_driftFilter ? m_driftFilter->LastMahalanobis() : 0.0;
 }
 
+double CalibrationCalc::SlamFixCorrectionRamp() const {
+	return m_driftFilter ? m_driftFilter->CorrectionRamp() : 0.0;
+}
+
 std::vector<bool> CalibrationCalc::DetectOutliers() const {
 	// Use bigger step to get a rough rotation.
 	std::vector<DSample> deltas;

@@ -160,6 +160,8 @@ public:
 
 	// Internal EKF state for diagnostics (Mahalanobis, streak).
 	double SlamFixLastMahalanobis() const;
+	// Position-correction persistence ramp g in [0..1] (logging/diagnostic).
+	double SlamFixCorrectionRamp() const;
 
 	// Periodic R_mount refinement. Re-runs pose averaging on a sliding window
 	// of recent samples to update m_refToTargetPose, preventing frozen mount

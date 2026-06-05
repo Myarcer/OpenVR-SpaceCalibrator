@@ -25,6 +25,8 @@ void DriftFilter::Reset() {
     high_mahal_streak_ = 0;
     last_mahal_ = 0.0;
     initialized_ = false;
+    resid_ema_.setZero();
+    corr_ramp_ = 0.0;
 }
 
 void DriftFilter::ResetTo(const Sophus::SE3d& T_init) {
@@ -39,6 +41,10 @@ void DriftFilter::ResetTo(const Sophus::SE3d& T_init) {
     high_mahal_streak_ = 0;
     last_mahal_ = 0.0;
     initialized_ = true;
+    // Fresh start after a snap: no residual history, ramp begins from zero so the
+    // filter eases back in rather than immediately chasing.
+    resid_ema_.setZero();
+    corr_ramp_ = 0.0;
 }
 
 void DriftFilter::SymmetrizeP() {
@@ -47,6 +53,7 @@ void DriftFilter::SymmetrizeP() {
 
 void DriftFilter::Predict(double dt, double user_lin_speed_mps, double user_ang_speed_radps) {
     if (dt <= 0) return;
+    last_dt_ = dt;   // reused by the persistence ramp in Update()
 
     // Independent velocity damping for translation and rotation.
     // Translational drift (SLAM scale error during walking) and rotational
@@ -145,6 +152,25 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas_in,
     if (out_innov_pos_m) *out_innov_pos_m = y_pos.norm();
     if (out_innov_rot_rad) *out_innov_rot_rad = y_rot.norm();  // true measured residual (diagnostic)
 
+    // --- Persistence ramp: don't chase transient small head bobs ---
+    // Low-pass the SIGNED position residual. An oscillatory bob (out then back)
+    // cancels -> stays small; a real net displacement's drift persists -> grows.
+    // The ramp gain g rises toward 1 only as that PERSISTENT residual exceeds the
+    // knee, then relaxes the position R by 1/g^2 below. g reaches 1.0 for genuine
+    // movement, so real 1-2m walks get full correction (no under-correction); a
+    // small slow bob keeps g near the floor, so it is effectively not chased.
+    resid_ema_ = (1.0 - params.ramp_resid_ema_alpha) * resid_ema_
+               + params.ramp_resid_ema_alpha * y_pos;
+    double persist = resid_ema_.norm();
+    double g_span = std::max(1e-6, params.ramp_g_hi_m - params.ramp_g_lo_m);
+    double g_t = (persist - params.ramp_g_lo_m) / g_span;
+    g_t = std::min(1.0, std::max(0.0, g_t));
+    double g_target = std::max(params.ramp_g_floor, g_t * g_t * (3.0 - 2.0 * g_t)); // smoothstep
+    double tau = (g_target > corr_ramp_) ? params.ramp_tau_up_s : params.ramp_tau_down_s;
+    double step = last_dt_ / std::max(1e-3, tau);
+    corr_ramp_ += std::min(step, std::max(-step, g_target - corr_ramp_));
+    corr_ramp_ = std::min(1.0, std::max(0.0, corr_ramp_));
+
     // Rotation channel null (params.correct_rotation == false). Drop the rotation
     // residual from y NOW - before it reaches S, the Mahalanobis test, or the
     // gain - so rotation cannot be corrected, cannot trip a reset on a head-turn
@@ -164,6 +190,12 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas_in,
     double lever_speed = user_ang_speed_radps * lever_arm_m;             // m/s apparent translation from rotation about offset puck
     double R_pos_inflated = params.R_static_pos_sq
                           + params.k_lever * lever_speed * lever_speed;
+    // Persistence ramp: inflate position R by 1/g^2 so the gain (and the P-shrink)
+    // stay self-consistent - a transient bob (g~floor) is barely corrected and the
+    // residual is preserved to keep re-triggering, while persistent drift (g->1)
+    // sees the normal gain. Rotation channel is untouched (it is nulled anyway).
+    double g_eff = std::max(params.ramp_g_floor, corr_ramp_);
+    R_pos_inflated /= (g_eff * g_eff);
     double R_rot_inflated = params.R_static_rot_sq
                           + params.k_omega_rot * user_ang_speed_radps * user_ang_speed_radps;
     for (int i = 0; i < 3; ++i) R(i, i)     = R_pos_inflated;

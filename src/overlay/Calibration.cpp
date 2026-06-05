@@ -1002,6 +1002,7 @@ void CalibrationTick(double time)
 		Metrics::slamfix_v_lin_mm_s.Push(user_lin_speed_r * 1000.0);
 		Metrics::slamfix_v_ang_deg_s.Push(user_ang_speed_r * 180.0 / EIGEN_PI);
 		Metrics::slamfix_mahal.Push(mahal);
+		Metrics::slamfix_corr_ramp.Push(calibration.SlamFixCorrectionRamp());
 
 		// RefineRMount REMOVED: Both implementations are harmful.
 		// - EKF-based: circular lock (drift → R_mount → confirms drift)
