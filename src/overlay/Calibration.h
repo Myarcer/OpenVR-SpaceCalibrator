@@ -83,6 +83,16 @@ struct CalibrationContext
 	// validation gate quality. Translation-only fallback when variance is low.
 	int slamFixKabschRecenterTicks = 0;
 
+	// Consecutive "settled" ticks (low linear AND angular speed). A recenter
+	// re-solves an absolute center (and rotation) from the sample buffer; while
+	// the user is MOVING, every buffer sample is lever-arm/latency-corrupted, so
+	// the high buffer-fit error is an artifact - NOT real drift - and re-fitting
+	// to it snaps the transform to garbage (logged: recenter fired 6x mid-walk at
+	// up to 1.5 m/s, tilting the cal and decalibrating vertically; yet on stopping
+	// the cal settled to 0.4mm by itself). Only recenter once the buffer has
+	// filled with settled, trustworthy samples.
+	int slamFixSettleTicks = 0;
+
 	// --- SLAM-Fix self-tuning drift rate ---
 	// Learned EKF process-noise (variances). sigma_lin_pos_sq == (drift_per_meter)^2,
 	// sigma_ang_rot_sq == (drift_per_rad)^2. Persisted; pushed into the filter at

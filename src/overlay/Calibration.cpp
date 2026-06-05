@@ -809,6 +809,17 @@ void CalibrationTick(double time)
 		double user_lin_speed_r = user_lin_speed_raw;
 		double user_ang_speed_r = user_ang_speed_raw;
 
+		// Settle tracking for the recenter gate: count consecutive ticks where the
+		// user is barely moving (both linear AND angular), so the sample buffer is
+		// trustworthy (not lever-arm/latency-corrupted by motion). Any real movement
+		// resets it - the recenter then waits for the buffer to re-fill once settled.
+		const double SETTLE_LIN_MPS  = 0.08;  // m/s (~8 cm/s) - effectively stationary
+		const double SETTLE_ANG_RADPS = 0.15; // rad/s (~9 deg/s) - not turning
+		if (user_lin_speed_r > SETTLE_LIN_MPS || user_ang_speed_r > SETTLE_ANG_RADPS)
+			ctx.slamFixSettleTicks = 0;
+		else
+			ctx.slamFixSettleTicks++;
+
 		// Lever arm: actual puck-to-HMD offset magnitude from the locked R_mount
 		// (was a hardcoded 0.10). The R-inflation that freezes position during a
 		// head turn must match the true geometry or rotation leaks into the
@@ -1029,8 +1040,13 @@ void CalibrationTick(double time)
 		// (gates a: full rotational observability, b: abs RMS < maxRelErr) and snap
 		// to it whenever it merely beats the current state, exactly like FAST does.
 		ctx.slamFixKabschRecenterTicks++;
+		// Require ~1.5s of settled (near-stationary) motion so the buffer is clean
+		// before re-fitting. This stops the recenter from snapping to a
+		// motion-corrupted buffer mid-walk (the vertical-decalibration symptom).
+		const int RECENTER_SETTLE_REQUIRED = 90;  // ticks (~1.5s) settled
 		double recenterFired = 0.0;
 		if (ctx.slamFixKabschRecenterTicks >= 100
+			&& ctx.slamFixSettleTicks >= RECENTER_SETTLE_REQUIRED
 			&& calibration.SampleCount() >= 50)
 		{
 			ctx.slamFixKabschRecenterTicks = 0;
