@@ -876,25 +876,34 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 
 	// Mirrors FAST's full-Kabsch acceptance logic in ComputeIncremental exactly.
 	// Gates, in order:
-	//   (0) Translational spread: skip if the buffer's reference positions span
-	//       more than ~15cm RMS — user was WALKING during the buffer window, so
-	//       Kabsch translation is an average over a trajectory, not a real position.
-	//       Only fires when user was rotating in place (good rotation variance,
-	//       stable translation), which is exactly when FAST observably fires.
+	//   (0) Spread-scaled threshold: compute RMS spread of buffer positions.
+	//       Low spread (rotating in place, ~5cm) -> threshold stays at caller value.
+	//       High spread (buffer spans a walk trajectory) -> threshold scales up,
+	//       requiring much larger EKF improvement to justify a hard reset.
+	//       This is NOT a hard cutoff: recenter still fires after long walks if
+	//       the EKF has genuinely drifted far (large priorError), but suppresses
+	//       spurious snaps to walk-trajectory averages.
 	//   (1) Variance gate: skip if variance is low AND declining (not enough rotation)
 	//   (2) ValidateCalibration: error < 100mm
-	//   (3) Improvement gate: new fit must beat current EKF state by `threshold`
-	//       (caller passes FAST's contThr=1.4, requiring 28% improvement)
+	//   (3) Improvement gate: new fit must beat current EKF state by spread-scaled threshold
+	double effectiveThreshold = threshold;
 	{
 		Eigen::Vector3d refMean = Eigen::Vector3d::Zero();
 		int validN = 0;
 		for (const auto& s : m_samples) { if (s.valid) { refMean += s.ref.trans; validN++; } }
-		if (validN < 50) return false;
-		refMean /= validN;
-		double spreadSq = 0.0;
-		for (const auto& s : m_samples) { if (s.valid) spreadSq += (s.ref.trans - refMean).squaredNorm(); }
-		double spreadRms = std::sqrt(spreadSq / validN);
-		if (spreadRms > 0.15) return false;  // >15cm RMS = walking buffer, skip
+		if (validN >= 10) {
+			refMean /= validN;
+			double spreadSq = 0.0;
+			for (const auto& s : m_samples) { if (s.valid) spreadSq += (s.ref.trans - refMean).squaredNorm(); }
+			double spreadRms = std::sqrt(spreadSq / validN);
+			// spreadRms ~0.05m (rotating in place) -> scale ~1.0x (no change)
+			// spreadRms ~0.50m (brisk walk buffer)  -> scale ~3.0x (needs 3x improvement)
+			// Soft ramp: scale = 1 + (spreadRms / 0.25)^1.5, clamped to [1, 5]
+			double s = spreadRms / 0.25;
+			double scale = 1.0 + std::pow(s, 1.5);
+			if (scale > 5.0) scale = 5.0;
+			effectiveThreshold = threshold * scale;
+		}
 	}
 
 	Eigen::AffineCompact3d cand = ComputeCalibration(ignoreOutliers);
@@ -912,7 +921,7 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 	// (3) Mirror ComputeIncremental lines 1093-1098: improvement gate.
 	double priorError = 0.0;
 	ValidateCalibration(m_estimatedTransformation, &priorError, nullptr);
-	if (m_isValid && priorError < newError * threshold) return false;
+	if (m_isValid && priorError < newError * effectiveThreshold) return false;
 
 	// Sanity: reject only physically absurd jumps (not in FAST, but safe to keep).
 	if ((cand.translation() - m_estimatedTransformation.translation()).norm() > 1.0) return false;
