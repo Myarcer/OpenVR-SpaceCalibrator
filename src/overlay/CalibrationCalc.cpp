@@ -899,15 +899,28 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 	double axisVar = ComputeAxisVariance(kabschCal)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
 
-	// FAST-preset baseline: only re-center when rotation is OBSERVABLE, then
-	// re-solve rotation+translation via full Kabsch - exactly what the FAST
-	// continuous preset does (ComputeIncremental's accept gate uses the same
-	// AxisVarianceThreshold). FAST "waits until it has enough data" = it waits for
-	// this rotational variance, so small head movements (low variance) are never
-	// re-centered. The previous locked-R translation-only fallback (commit 556310c)
-	// had NO variance requirement, so it fired on rotation-corrupted buffers during
-	// small head turns and snapped the center to garbage (observed errC 12->132mm).
-	if (axisVar < AxisVarianceThreshold) return false;
+	if (axisVar < AxisVarianceThreshold) {
+		// Low rotation variance: use locked-R translation-only path, mirroring
+		// FAST's lockRelPos branch in ComputeIncremental. No variance required -
+		// just a clean fit that beats the current EKF state. R_mount stays locked.
+		Eigen::AffineCompact3d relCand;
+		CalibrateByRelPose(relCand);
+		const auto relOffset = ComputeRefToTargetOffset(relCand);
+		double relError = RetargetingErrorRMS(relOffset, relCand);
+		if (relError > maxRelErr) return false;
+		const auto curOffset2 = ComputeRefToTargetOffset(m_estimatedTransformation);
+		double curError2 = RetargetingErrorRMS(curOffset2, m_estimatedTransformation);
+		if (relError * threshold >= curError2) return false;
+		Eigen::Vector3d pd = relCand.translation() - m_estimatedTransformation.translation();
+		double pdNorm = pd.norm();
+		if (pdNorm < 0.005) return false;
+		if (pdNorm > 1.0) return false;
+		Eigen::Quaterniond q(relCand.rotation()); q.normalize();
+		m_driftFilter->ResetTo(Sophus::SE3d(q, relCand.translation()));
+		m_estimatedTransformation = relCand;
+		return true;
+	}
+	// Rotation observable: full Kabsch re-solve (also refreshes R_mount).
 	const bool fullObservable = true;
 	Eigen::AffineCompact3d cand = kabschCal;
 
