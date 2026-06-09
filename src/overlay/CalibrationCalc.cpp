@@ -912,9 +912,7 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 		double curError2 = RetargetingErrorRMS(curOffset2, m_estimatedTransformation);
 		if (relError * threshold >= curError2) return false;
 		Eigen::Vector3d pd = relCand.translation() - m_estimatedTransformation.translation();
-		double pdNorm = pd.norm();
-		if (pdNorm < 0.005) return false;
-		if (pdNorm > 1.0) return false;
+		if (pd.norm() > 1.0) return false;    // >1m = numerically broken
 		Eigen::Quaterniond q(relCand.rotation()); q.normalize();
 		m_driftFilter->ResetTo(Sophus::SE3d(q, relCand.translation()));
 		m_estimatedTransformation = relCand;
