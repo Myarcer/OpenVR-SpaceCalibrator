@@ -1033,6 +1033,10 @@ void CalibrationTick(double time)
 				ScanAndApplyProfile(ctx);
 				CalCtx.Log("SLAM-Fix: Kabsch recenter corrected drift\n");
 				recenterFired = 1.0;
+				// Purge pre-recenter samples: they reference the old EKF state.
+				// Next evaluation only fires once 200 fresh samples accumulate
+				// (~3s), preventing a second snap to a half-old, half-new buffer.
+				while (calibration.SampleCount() > 0) calibration.ShiftSample();
 			}
 			// Push axis variance to debug graph regardless of correction.
 			Metrics::axisIndependence.Push(axVar);
