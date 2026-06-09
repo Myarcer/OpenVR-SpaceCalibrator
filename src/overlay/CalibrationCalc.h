@@ -174,16 +174,14 @@ public:
 	                  double max_pos_delta_m = 0.02,
 	                  double max_rot_delta_rad = 0.035);
 
-	// Kabsch recenter for SLAM-Fix. Runs a full stateless Kabsch re-solve
-	// from the sample buffer. If the result is valid and diverges from the
-	// current EKF state, corrects both R_mount and EKF to break the circular
-	// dependency where RefineRMount absorbs EKF drift into R_mount, which
-	// then confirms the drifted state via T_meas.
-	// Two paths: full Kabsch (high axis variance) or translation-only
-	// correction using existing rotation (low variance fallback).
+	// Kabsch recenter for SLAM-Fix. Mirrors FAST's full-Kabsch acceptance logic
+	// in ComputeIncremental exactly: variance gate (skip if low AND declining),
+	// ValidateCalibration (100mm), improvement gate (threshold, caller passes
+	// FAST's contThr=1.4 requiring 28% improvement). Only fires when the buffer
+	// genuinely supports a confident re-solve — same conditions FAST uses.
 	// out_axisVariance: written with computed axis variance for metrics.
 	// Returns true if a correction was applied.
-	bool SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double maxRelErr, double* out_axisVariance = nullptr);
+	bool SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double* out_axisVariance = nullptr);
 
 	// Compute current calibration quality metrics without modifying state.
 	void ComputeCurrentCalMetrics(double* rmsError, Eigen::Vector3d* posOffset) const;

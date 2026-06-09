@@ -869,85 +869,41 @@ bool CalibrationCalc::RefineRMount(double blend_alpha,
 	return true;
 }
 
-bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double maxRelErr, double* out_axisVariance) {
+bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double* out_axisVariance) {
 	if (out_axisVariance) *out_axisVariance = 0.0;
 	if (m_samples.size() < 50) return false;
 	if (!m_relativePosCalibrated || !m_isValid) return false;
 
-	// Confidence-gated recenter. R_mount is ALWAYS locked here (precondition
-	// above), so there are two valid candidate solutions and we pick by whether
-	// rotation is observable in the current buffer:
-	//
-	//   FULL KABSCH (rotation observable): re-solve rotation+translation and also
-	//     refresh the locked R_mount. Used when the user has rotated enough that
-	//     the delta-rotation axes span the space (axisVar >= threshold).
-	//
-	//   LOCKED-R TRANSLATION-ONLY (rotation NOT observable): keep the locked
-	//     rotation and re-solve ONLY the absolute translation from the buffer via
-	//     CalibrateByRelPose (average of ref*R_mount*target^-1). This is the exact
-	//     path FAST runs every tick with lockRelPos, needs zero rotational motion,
-	//     and is what lets a pure straight-line WALK re-center (the symptom: SLAM
-	//     never centered while walking corner-to-corner, FAST snapped instantly).
-	//     Re-solving rotation under low variance is what produced a bad tilt and
-	//     was flagged as wrong - translation-only never touches rotation, so it is
-	//     safe. R_mount is NOT refreshed here (it stays the trusted locked value).
-	//
-	// Either candidate then passes the same acceptance gates FAST uses:
-	//   (b) low absolute RMS error  -> the fit itself is trustworthy,
-	//   (c) better than the current (possibly drifted) EKF state by the margin.
-	Eigen::AffineCompact3d kabschCal = ComputeCalibration(ignoreOutliers);
-	double axisVar = ComputeAxisVariance(kabschCal)(1);
+	// Mirrors FAST's full-Kabsch acceptance logic in ComputeIncremental exactly.
+	// Three gates, in order:
+	//   (1) Variance gate: skip if variance is low AND declining (not enough rotation)
+	//   (2) ValidateCalibration: error < 100mm
+	//   (3) Improvement gate: new fit must beat current EKF state by `threshold`
+	//       (caller passes FAST's contThr=1.4, requiring 28% improvement)
+	// No translation-only fallback: CalibrateByRelPose over a mixed-position
+	// 200-sample buffer is not valid for a hard EKF reset while moving.
+	Eigen::AffineCompact3d cand = ComputeCalibration(ignoreOutliers);
+	double axisVar = ComputeAxisVariance(cand)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
 
-	if (axisVar < AxisVarianceThreshold) {
-		// Low rotation variance: use locked-R translation-only path, mirroring
-		// FAST's lockRelPos branch in ComputeIncremental. No variance required -
-		// just a clean fit that beats the current EKF state. R_mount stays locked.
-		Eigen::AffineCompact3d relCand;
-		CalibrateByRelPose(relCand);
-		const auto relOffset = ComputeRefToTargetOffset(relCand);
-		double relError = RetargetingErrorRMS(relOffset, relCand);
-		if (relError > maxRelErr) return false;
-		const auto curOffset2 = ComputeRefToTargetOffset(m_estimatedTransformation);
-		double curError2 = RetargetingErrorRMS(curOffset2, m_estimatedTransformation);
-		if (relError * threshold >= curError2) return false;
-		Eigen::Vector3d pd = relCand.translation() - m_estimatedTransformation.translation();
-		if (pd.norm() > 1.0) return false;    // >1m = numerically broken
-		Eigen::Quaterniond q(relCand.rotation()); q.normalize();
-		m_driftFilter->ResetTo(Sophus::SE3d(q, relCand.translation()));
-		m_estimatedTransformation = relCand;
-		return true;
-	}
-	// Rotation observable: full Kabsch re-solve (also refreshes R_mount).
-	const bool fullObservable = true;
-	Eigen::AffineCompact3d cand = kabschCal;
+	// (1) Mirror ComputeIncremental line 1085: skip if variance low AND declining.
+	if (axisVar < AxisVarianceThreshold && axisVar < m_axisVariance) return false;
+	m_axisVariance = axisVar;
 
-	// (b) Absolute error gate: the candidate fit must itself be good.
-	const auto posOffset = ComputeRefToTargetOffset(cand);
-	double rmsError = RetargetingErrorRMS(posOffset, cand);
-	if (rmsError > maxRelErr) return false;
+	// (2) Mirror ComputeIncremental line 1089: ValidateCalibration (error < 100mm).
+	double newError = 0.0;
+	if (!ValidateCalibration(cand, &newError, nullptr)) return false;
 
-	// (c) Improvement gate (FAST's exact acceptance test): only recenter if the
-	// candidate beats the current - possibly drifted - EKF state by the margin.
-	// A drifted EKF has a high error here, so a clean fit wins and snaps it back
-	// no matter how far it drifted.
-	const auto curOffset = ComputeRefToTargetOffset(m_estimatedTransformation);
-	double curError = RetargetingErrorRMS(curOffset, m_estimatedTransformation);
-	if (rmsError * threshold >= curError) return false;
+	// (3) Mirror ComputeIncremental lines 1093-1098: improvement gate.
+	double priorError = 0.0;
+	ValidateCalibration(m_estimatedTransformation, &priorError, nullptr);
+	if (m_isValid && priorError < newError * threshold) return false;
 
-	// Divergence sanity: skip sub-mm churn, and reject only physically absurd
-	// jumps (numerically broken fit) - NOT large-but-confident corrections.
-	Eigen::Vector3d posDiff = cand.translation() - m_estimatedTransformation.translation();
-	double posDiffM = posDiff.norm();
-	Eigen::Matrix3d rotDiff = m_estimatedTransformation.rotation().transpose() * cand.rotation();
-	double rotTrace = std::min(3.0, std::max(-1.0, rotDiff.trace()));
-	double rotDiffRad = std::acos((rotTrace - 1.0) / 2.0);
-	if (posDiffM < 0.005 && rotDiffRad < 0.00873) return false;   // trivial, leave it
-	if (posDiffM > 1.0 || rotDiffRad > 0.52) return false;        // >1m / >30deg = garbage
+	// Sanity: reject only physically absurd jumps (not in FAST, but safe to keep).
+	if ((cand.translation() - m_estimatedTransformation.translation()).norm() > 1.0) return false;
 
-	// Refresh the locked R_mount from RECENT samples - ONLY when we re-solved
-	// rotation (full Kabsch). The translation-only path keeps R_mount untouched.
-	if (fullObservable) {
+	// Refresh R_mount from recent samples (rotation is observable here).
+	{
 		const size_t RECENT_COUNT = 30;
 		size_t total = m_samples.size();
 		size_t start = (total > RECENT_COUNT) ? (total - RECENT_COUNT) : 0;

@@ -1010,24 +1010,13 @@ void CalibrationTick(double time)
 		// R_mount stays frozen from bootstrap. Kabsch recenter below handles
 		// periodic correction when there's enough rotational variance.
 
-		// Kabsch recenter: confidence-gated, driven by FAST's acceptance test.
-		// The 100-tick (~1s) cadence is only an evaluation budget (a full Kabsch
-		// SVD is too costly per frame); whether it actually fires is decided
-		// entirely inside SlamFixKabschRecenter by the SAME confidence gate the
-		// FAST/continuous preset uses (variance + absolute error + improvement
-		// over the current EKF state). So it recenters only when a confident,
-		// fully-observable Kabsch fit exists - not on the timer, not in low motion.
-		// Feeds axis variance to the debug graph so corrections are visible.
-		//
-		// Threshold is forced to 1.0 (FAST's contThr), NOT the SLAM contThr of 2.0:
-		// the EKF blinds its position channel during head rotation (lever-arm
-		// R-inflation), so it coasts on stale prediction and the calibration slides
-		// (observed: ~60cm wander over a SLAM block while error stayed "low" because
-		// it was buffer-relative). Requiring Kabsch to be 2x better than that drifted
-		// state meant the recenter never fired and SLAM never re-centered - flipping
-		// to FAST (contThr=1) snapped instantly. We trust a fresh, confident Kabsch
-		// (gates a: full rotational observability, b: abs RMS < maxRelErr) and snap
-		// to it whenever it merely beats the current state, exactly like FAST does.
+		// Kabsch recenter: periodically run FAST's exact full-Kabsch acceptance
+		// logic against the rolling sample buffer. The 100-tick cadence is a cost
+		// budget (SVD is expensive); the gates inside SlamFixKabschRecenter mirror
+		// ComputeIncremental exactly — variance gate, ValidateCalibration (100mm),
+		// and 28% improvement requirement (FAST's contThr=1.4). Only fires when the
+		// buffer has enough rotational spread AND the new fit is meaningfully better,
+		// same as FAST.
 		ctx.slamFixKabschRecenterTicks++;
 		double recenterFired = 0.0;
 		if (ctx.slamFixKabschRecenterTicks >= 100
@@ -1036,8 +1025,7 @@ void CalibrationTick(double time)
 			ctx.slamFixKabschRecenterTicks = 0;
 			double axVar = 0.0;
 			if (calibration.SlamFixKabschRecenter(true,
-					1.0,   // trust Kabsch: snap when it beats the (possibly drifted) EKF state
-					CalCtx.EffectiveMaxRelativeErrorThreshold(),
+					1.4,   // FAST's contThr: require 28% improvement, same as FAST
 					&axVar)) {
 				ctx.calibratedRotation = calibration.EulerRotation();
 				ctx.calibratedTranslation = calibration.Transformation().translation() * 100.0;
