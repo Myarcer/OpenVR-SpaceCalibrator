@@ -388,8 +388,10 @@ int CalibrationCalc::EstimatePerAxisScale(Eigen::Vector3d& scale, PerAxisScaleDi
 	// the target displacement into the reference frame via the calibration rotation
 	// first, so Srr and Stt are expressed on the SAME axes - the reference/world
 	// frame, which is also the frame the driver applies the per-axis gain in.
-	const Eigen::Matrix3d Rcal = m_isValid
-		? m_estimatedTransformation.rotation()
+	// m_refToTargetPose is the rigid mount rotation (R_mount: lighthouse→Pico).
+	// m_estimatedTransformation is the EKF drift transform (near-identity) - wrong.
+	const Eigen::Matrix3d Rcal = m_relativePosCalibrated
+		? m_refToTargetPose.rotation()
 		: Eigen::Matrix3d::Identity();
 	Eigen::Vector3d Srr = Eigen::Vector3d::Zero(), Stt = Eigen::Vector3d::Zero();
 	for (const auto& s : m_samples) {
