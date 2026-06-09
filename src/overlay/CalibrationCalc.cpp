@@ -875,13 +875,28 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 	if (!m_relativePosCalibrated || !m_isValid) return false;
 
 	// Mirrors FAST's full-Kabsch acceptance logic in ComputeIncremental exactly.
-	// Three gates, in order:
+	// Gates, in order:
+	//   (0) Translational spread: skip if the buffer's reference positions span
+	//       more than ~15cm RMS — user was WALKING during the buffer window, so
+	//       Kabsch translation is an average over a trajectory, not a real position.
+	//       Only fires when user was rotating in place (good rotation variance,
+	//       stable translation), which is exactly when FAST observably fires.
 	//   (1) Variance gate: skip if variance is low AND declining (not enough rotation)
 	//   (2) ValidateCalibration: error < 100mm
 	//   (3) Improvement gate: new fit must beat current EKF state by `threshold`
 	//       (caller passes FAST's contThr=1.4, requiring 28% improvement)
-	// No translation-only fallback: CalibrateByRelPose over a mixed-position
-	// 200-sample buffer is not valid for a hard EKF reset while moving.
+	{
+		Eigen::Vector3d refMean = Eigen::Vector3d::Zero();
+		int validN = 0;
+		for (const auto& s : m_samples) { if (s.valid) { refMean += s.ref.trans; validN++; } }
+		if (validN < 50) return false;
+		refMean /= validN;
+		double spreadSq = 0.0;
+		for (const auto& s : m_samples) { if (s.valid) spreadSq += (s.ref.trans - refMean).squaredNorm(); }
+		double spreadRms = std::sqrt(spreadSq / validN);
+		if (spreadRms > 0.15) return false;  // >15cm RMS = walking buffer, skip
+	}
+
 	Eigen::AffineCompact3d cand = ComputeCalibration(ignoreOutliers);
 	double axisVar = ComputeAxisVariance(cand)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
