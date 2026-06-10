@@ -794,6 +794,7 @@ void CalibrationTick(double time)
 		Metrics::slamfix_v_lin_mm_s.Push(user_lin_speed_r * 1000.0);
 		Metrics::slamfix_v_ang_deg_s.Push(user_ang_speed_r * 180.0 / EIGEN_PI);
 		Metrics::slamfix_mahal.Push(mahal);
+		Metrics::slamfix_corr_ramp.Push(calibration.SlamFixCorrectionRamp());
 
 		// RefineRMount REMOVED: Both implementations are harmful.
 		// - EKF-based: circular lock (drift → R_mount → confirms drift)
@@ -801,33 +802,34 @@ void CalibrationTick(double time)
 		// R_mount stays frozen from bootstrap. Kabsch recenter below handles
 		// periodic correction when there's enough rotational variance.
 
-		// Kabsch recenter: confidence-gated, driven by FAST's acceptance test.
-		// The 100-tick (~1s) cadence is only an evaluation budget (a full Kabsch
-		// SVD is too costly per frame); whether it actually fires is decided
-		// entirely inside SlamFixKabschRecenter by the SAME confidence gate the
-		// FAST/continuous preset uses (variance + absolute error + improvement
-		// over the current EKF state by the contThr margin). So it recenters only
-		// when FAST itself would be certain - not on the timer, not in low motion.
-		// Feeds axis variance to the debug graph so corrections are visible.
+		// Kabsch recenter: periodically run FAST's exact full-Kabsch acceptance
+		// logic against the rolling sample buffer. The 100-tick cadence is a cost
+		// budget (SVD is expensive); the gates inside SlamFixKabschRecenter mirror
+		// ComputeIncremental exactly — variance gate, ValidateCalibration (100mm),
+		// and 28% improvement requirement (FAST's contThr=1.4). Only fires when the
+		// buffer has enough rotational spread AND the new fit is meaningfully better,
+		// same as FAST.
 		ctx.slamFixKabschRecenterTicks++;
+		double recenterFired = 0.0;
 		if (ctx.slamFixKabschRecenterTicks >= 100
 			&& calibration.SampleCount() >= 50)
 		{
 			ctx.slamFixKabschRecenterTicks = 0;
 			double axVar = 0.0;
 			if (calibration.SlamFixKabschRecenter(true,
-					CalCtx.EffectiveContinuousCalibrationThreshold(),
-					CalCtx.EffectiveMaxRelativeErrorThreshold(),
+					1.4,   // FAST's contThr: require 28% improvement, same as FAST
 					&axVar)) {
 				ctx.calibratedRotation = calibration.EulerRotation();
 				ctx.calibratedTranslation = calibration.Transformation().translation() * 100.0;
 				ctx.validProfile = true;
 				ScanAndApplyProfile(ctx);
 				CalCtx.Log("SLAM-Fix: Kabsch recenter corrected drift\n");
+				recenterFired = 1.0;
 			}
 			// Push axis variance to debug graph regardless of correction.
 			Metrics::axisIndependence.Push(axVar);
 		}
+		Metrics::slamfix_recenter.Push(recenterFired);
 
 		// Write standard metrics for debug graphs (otherwise frozen/stale
 		// during SLAM-Fix tracking because ComputeIncremental is bypassed).

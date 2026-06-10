@@ -60,6 +60,11 @@ namespace Metrics {
 	extern TimeSeries<double> slamfix_v_lin_mm_s;
 	extern TimeSeries<double> slamfix_v_ang_deg_s;
 	extern TimeSeries<double> slamfix_mahal;
+	// Position-correction persistence ramp g in [0..1]: ~0 = transient (head bob)
+	// suppressed, 1 = persistent drift -> full correction.
+	extern TimeSeries<double> slamfix_corr_ramp;
+	// 1.0 on the tick a Kabsch recenter actually fired (snapped the center), else 0.
+	extern TimeSeries<double> slamfix_recenter;
 
 	extern bool enableLogs;
 

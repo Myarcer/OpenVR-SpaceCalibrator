@@ -76,10 +76,11 @@ struct CalibrationContext
 	// pose averaging to keep R_mount fresh (prevents frozen mount error from
 	// amplifying into apparent translation during head rotation).
 	int slamFixRMountRefineTicks = 0;
-	// Kabsch recenter: periodic timer replaces motion/still state machine.
-	// Runs every N ticks regardless of velocity — axis variance + RMS
-	// validation gate quality. Translation-only fallback when variance is low.
+	// Kabsch recenter: periodic evaluation budget (~1s cadence). Gated purely
+	// by confidence (variance + RMS error + improvement over current EKF state),
+	// not motion speed. Translation-only fallback when rotation is not observable.
 	int slamFixKabschRecenterTicks = 0;
+
 
 	float xprev, yprev, zprev;
 

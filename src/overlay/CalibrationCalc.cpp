@@ -141,6 +141,10 @@ double CalibrationCalc::SlamFixLastMahalanobis() const {
 	return m_driftFilter ? m_driftFilter->LastMahalanobis() : 0.0;
 }
 
+double CalibrationCalc::SlamFixCorrectionRamp() const {
+	return m_driftFilter ? m_driftFilter->CorrectionRamp() : 0.0;
+}
+
 std::vector<bool> CalibrationCalc::DetectOutliers() const {
 	// Use bigger step to get a rough rotation.
 	std::vector<DSample> deltas;
@@ -775,58 +779,64 @@ bool CalibrationCalc::RefineRMount(double blend_alpha,
 	return true;
 }
 
-bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double maxRelErr, double* out_axisVariance) {
+bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double* out_axisVariance) {
 	if (out_axisVariance) *out_axisVariance = 0.0;
 	if (m_samples.size() < 50) return false;
 	if (!m_relativePosCalibrated || !m_isValid) return false;
 
-	// Confidence-gated recenter. The EKF snaps to a fresh Kabsch solution ONLY
-	// when that solution passes the SAME confidence test the FAST/continuous
-	// preset uses to accept a calibration (see ComputeIncremental):
-	//   (a) enough rotational variance -> rotation observable (NOT low-motion),
-	//   (b) low absolute RMS error     -> the Kabsch fit itself is trustworthy,
-	//   (c) better than the current EKF state by the contThr margin -> only
-	//       disturb the filter when the new solution is genuinely an improvement.
-	// So the recenter is as predictable as FAST: it fires only when FAST itself
-	// would be "certain" after enough motion - never on a timer, never in a
-	// low-motion state where the Kabsch fit may not be calibrated yet.
-	Eigen::AffineCompact3d kabschCal = ComputeCalibration(ignoreOutliers);
-	double axisVar = ComputeAxisVariance(kabschCal)(1);
+	// Mirrors FAST's full-Kabsch acceptance logic in ComputeIncremental exactly.
+	// Gates, in order:
+	//   (0) Spread-scaled threshold: compute RMS spread of buffer positions.
+	//       Low spread (rotating in place, ~5cm) -> threshold stays at caller value.
+	//       High spread (buffer spans a walk trajectory) -> threshold scales up,
+	//       requiring much larger EKF improvement to justify a hard reset.
+	//       This is NOT a hard cutoff: recenter still fires after long walks if
+	//       the EKF has genuinely drifted far (large priorError), but suppresses
+	//       spurious snaps to walk-trajectory averages.
+	//   (1) Variance gate: skip if variance is low AND declining (not enough rotation)
+	//   (2) ValidateCalibration: error < 100mm
+	//   (3) Improvement gate: new fit must beat current EKF state by spread-scaled threshold
+	double effectiveThreshold = threshold;
+	{
+		Eigen::Vector3d refMean = Eigen::Vector3d::Zero();
+		int validN = 0;
+		for (const auto& s : m_samples) { if (s.valid) { refMean += s.ref.trans; validN++; } }
+		if (validN >= 10) {
+			refMean /= validN;
+			double spreadSq = 0.0;
+			for (const auto& s : m_samples) { if (s.valid) spreadSq += (s.ref.trans - refMean).squaredNorm(); }
+			double spreadRms = std::sqrt(spreadSq / validN);
+			// spreadRms ~0.05m (rotating in place) -> scale ~1.0x (no change)
+			// spreadRms ~0.50m (brisk walk buffer)  -> scale ~3.0x (needs 3x improvement)
+			// Soft ramp: scale = 1 + (spreadRms / 0.25)^1.5, clamped to [1, 5]
+			double s = spreadRms / 0.25;
+			double scale = 1.0 + std::pow(s, 1.5);
+			if (scale > 5.0) scale = 5.0;
+			effectiveThreshold = threshold * scale;
+		}
+	}
+
+	Eigen::AffineCompact3d cand = ComputeCalibration(ignoreOutliers);
+	double axisVar = ComputeAxisVariance(cand)(1);
 	if (out_axisVariance) *out_axisVariance = axisVar;
 
-	// (a) Variance gate: require full rotational observability (full Kabsch).
-	// The old low-variance "translation-only" path is removed - correcting toward
-	// a Kabsch fit that isn't confidently calibrated is exactly what the user
-	// flagged as wrong.
-	const double FULL_KABSCH_THRESH = 0.01;
-	if (axisVar < FULL_KABSCH_THRESH) return false;
+	// (1) Mirror ComputeIncremental line 1085: skip if variance low AND declining.
+	if (axisVar < AxisVarianceThreshold && axisVar < m_axisVariance) return false;
+	m_axisVariance = axisVar;
 
-	// (b) Absolute error gate: the Kabsch fit must itself be good.
-	const auto posOffset = ComputeRefToTargetOffset(kabschCal);
-	double rmsError = RetargetingErrorRMS(posOffset, kabschCal);
-	if (rmsError > maxRelErr) return false;
+	// (2) Mirror ComputeIncremental line 1089: ValidateCalibration (error < 100mm).
+	double newError = 0.0;
+	if (!ValidateCalibration(cand, &newError, nullptr)) return false;
 
-	// (c) Improvement gate (FAST's exact acceptance test): only recenter if the
-	// Kabsch fit beats the current - possibly drifted - EKF state by the contThr
-	// margin. This also fixes "never re-centers": a drifted EKF has a high error
-	// here, so a clean Kabsch fit wins and snaps it back no matter how far it
-	// drifted - unlike the old hard 100mm cap, which rejected exactly those big
-	// recoveries and locked the drift in.
-	const auto curOffset = ComputeRefToTargetOffset(m_estimatedTransformation);
-	double curError = RetargetingErrorRMS(curOffset, m_estimatedTransformation);
-	if (rmsError * threshold >= curError) return false;
+	// (3) Mirror ComputeIncremental lines 1093-1098: improvement gate.
+	double priorError = 0.0;
+	ValidateCalibration(m_estimatedTransformation, &priorError, nullptr);
+	if (m_isValid && priorError < newError * effectiveThreshold) return false;
 
-	// Divergence sanity: skip sub-mm churn, and reject only physically absurd
-	// jumps (numerically broken Kabsch) - NOT large-but-confident corrections.
-	Eigen::Vector3d posDiff = kabschCal.translation() - m_estimatedTransformation.translation();
-	double posDiffM = posDiff.norm();
-	Eigen::Matrix3d rotDiff = m_estimatedTransformation.rotation().transpose() * kabschCal.rotation();
-	double rotTrace = std::min(3.0, std::max(-1.0, rotDiff.trace()));
-	double rotDiffRad = std::acos((rotTrace - 1.0) / 2.0);
-	if (posDiffM < 0.005 && rotDiffRad < 0.00873) return false;   // trivial, leave it
-	if (posDiffM > 1.0 || rotDiffRad > 0.52) return false;        // >1m / >30deg = garbage
+	// Sanity: reject only physically absurd jumps (not in FAST, but safe to keep).
+	if ((cand.translation() - m_estimatedTransformation.translation()).norm() > 1.0) return false;
 
-	// Estimate R_mount from RECENT samples only (tail of buffer).
+	// Refresh R_mount from recent samples (rotation is observable here).
 	{
 		const size_t RECENT_COUNT = 30;
 		size_t total = m_samples.size();
@@ -837,24 +847,24 @@ bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshol
 		for (size_t i = start; i < total; ++i) {
 			if (!m_samples[i].valid) continue;
 			auto pose = Eigen::Affine3d(
-				m_samples[i].ref.ToAffine().inverse() * kabschCal * m_samples[i].target.ToAffine());
+				m_samples[i].ref.ToAffine().inverse() * cand * m_samples[i].target.ToAffine());
 			avg.Push(Eigen::AffineCompact3d(pose));
 			++validCount;
 		}
 		if (validCount >= 4) {
 			m_refToTargetPose = avg.Average();
 		} else {
-			m_refToTargetPose = EstimateRefToTargetPose(kabschCal);
+			m_refToTargetPose = EstimateRefToTargetPose(cand);
 		}
 	}
 
-	// Snap EKF to Kabsch-derived calibration.
-	Eigen::Quaterniond q_kabsch(kabschCal.rotation());
-	q_kabsch.normalize();
-	Sophus::SE3d T_kabsch(q_kabsch, kabschCal.translation());
-	m_driftFilter->ResetTo(T_kabsch);
+	// Snap EKF to the candidate calibration.
+	Eigen::Quaterniond q_cand(cand.rotation());
+	q_cand.normalize();
+	Sophus::SE3d T_cand(q_cand, cand.translation());
+	m_driftFilter->ResetTo(T_cand);
 
-	m_estimatedTransformation = kabschCal;
+	m_estimatedTransformation = cand;
 	return true;
 }
 
