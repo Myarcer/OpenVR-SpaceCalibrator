@@ -107,7 +107,10 @@ ServerTrackedDeviceProvider::DeltaSize ServerTrackedDeviceProvider::GetTransform
 	const auto src_pose = src * deviceWorldPose;
 	const auto target_pose = target * deviceWorldPose;
 
-	const auto trans_delta = (src_pose.translation - target_pose.translation).squaredNorm();
+	// thr_trans_* are in meters, so compare against the linear norm. squaredNorm
+	// here silently required e.g. sqrt(0.005)=7.1cm before a "5mm" threshold
+	// tripped, misclassifying 1-2cm corrections as TINY (slow blend).
+	const auto trans_delta = (src_pose.translation - target_pose.translation).norm();
 	const auto rot_delta = src_pose.rotation.angularDistance(target_pose.rotation);
 
 	DeltaSize trans_level, rot_level;

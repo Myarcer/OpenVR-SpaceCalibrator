@@ -17,7 +17,7 @@
 //   dx     = K * y
 //   T_post = T_pred * Exp(dx[0:6])
 //   v_post = v_pred + dx[6:12]
-//   P_post = (I - K H) P_pred  (Joseph form for stability)
+//   P_post = (I - K H) P_pred  (standard form + symmetrization)
 //
 // Reset (Mahalanobis-driven):
 //   m = sqrt(y^T * S^-1 * y)
@@ -118,20 +118,21 @@ public:
                                              // static floor than FAST preset's Kabsch
                                              // (which averages 100-500 samples,
                                              // effectively shrinking sigma by sqrt(N)).
-        double k_lever           = 100.0;    // R-inflation gain on (omega*L)^2
-        // Time-skew between reference (lighthouse, low latency) and target
-        // (SLAM, ~10-25ms latency typical for Pico/Quest streamed via
-        // VirtualDesktop/ALVR) creates apparent translational error
-        // proportional to user linear speed. R_pos += k_skew*(v_lin*dt_skew)^2
-        // absorbs this without rejecting samples.
+        double k_lever           = 25.0;     // R-inflation gain on (omega*L)^2
+        // Time-skew between reference (SLAM HMD, ~10-25ms latency typical for
+        // Pico/Quest streamed via VirtualDesktop/ALVR) and target (lighthouse,
+        // low latency) creates apparent translational error proportional to
+        // user linear speed. The measurement is now skew-COMPENSATED upstream
+        // (CalibrationCalc extrapolates the ref pose forward by dt_skew), so
+        // these gains only cover the RESIDUAL skew error; they were 100.0 when
+        // R-inflation was the sole defense, which made the filter blind during
+        // motion and pushed all correction into the post-move standstill.
         double dt_skew_s         = 0.020;    // assumed time skew (Pico+VD typical)
-        double k_skew            = 100.0;    // R-inflation gain on (v_lin*dt_skew)^2
-        // Rotation R inflation. Lighthouse rotation is fast; SLAM rotation
-        // lags by dt_skew so during a head turn there is a systematic
-        // rotation residual ~ omega*dt_skew that must NOT trigger aggressive
-        // correction. Plus a per-tick term for raw SLAM rotation jitter
-        // that grows during fast rotation (motion blur, feature loss).
-        double k_skew_rot        = 100.0;    // R-inflation gain on (omega*dt_skew)^2 (rad^2)
+        double k_skew            = 25.0;     // R-inflation gain on (v_lin*dt_skew)^2
+        // Rotation R inflation for residual rotation skew after compensation,
+        // plus a per-tick term for raw SLAM rotation jitter that grows during
+        // fast rotation (motion blur, feature loss).
+        double k_skew_rot        = 25.0;     // R-inflation gain on (omega*dt_skew)^2 (rad^2)
         double k_omega_rot       = 1.0e-3;   // R-inflation gain on omega^2 (rad^2 per (rad/s)^2)
 
         double reset_mahal_thresh = 5.0;
@@ -148,11 +149,11 @@ public:
         // g~0 -> R huge -> no chase, g=1 -> normal gain. Because g reaches 1.0 for
         // genuine net movement, a real 1-2m walk is corrected at FULL strength -
         // the bob suppression never under-corrects real locomotion.
-        double ramp_resid_ema_alpha = 0.03;  // EMA weight on signed residual (~0.5s @ 60Hz)
+        double ramp_resid_tau_s     = 0.25;  // EMA time constant on signed residual (dt-normalized)
         double ramp_g_lo_m          = 0.005; // persistent residual <= this -> g at floor (no chase)
         double ramp_g_hi_m          = 0.030; // persistent residual >= this -> g = 1 (full correction)
-        double ramp_g_floor         = 0.02;  // min g (avoids R blow-up / permanent lockout)
-        double ramp_tau_up_s        = 1.5;   // max ramp-up time toward full gain
+        double ramp_g_floor         = 0.10;  // min g (avoids R blow-up / permanent lockout)
+        double ramp_tau_up_s        = 0.5;   // max ramp-up time toward full gain
         double ramp_tau_down_s      = 0.4;   // faster collapse when the transient ends
     };
     Params params;

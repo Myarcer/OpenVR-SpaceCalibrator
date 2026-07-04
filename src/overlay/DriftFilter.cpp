@@ -45,6 +45,7 @@ void DriftFilter::ResetTo(const Sophus::SE3d& T_init) {
     // filter eases back in rather than immediately chasing.
     resid_ema_.setZero();
     corr_ramp_ = 0.0;
+    last_dt_ = 0.01;
 }
 
 void DriftFilter::SymmetrizeP() {
@@ -152,8 +153,8 @@ bool DriftFilter::Update(const Sophus::SE3d& T_meas,
     // knee, then relaxes the position R by 1/g^2 below. g reaches 1.0 for genuine
     // movement, so real 1-2m walks get full correction (no under-correction); a
     // small slow bob keeps g near the floor, so it is effectively not chased.
-    resid_ema_ = (1.0 - params.ramp_resid_ema_alpha) * resid_ema_
-               + params.ramp_resid_ema_alpha * y_pos;
+    double ema_alpha = std::min(1.0, last_dt_ / std::max(1e-3, params.ramp_resid_tau_s));
+    resid_ema_ = (1.0 - ema_alpha) * resid_ema_ + ema_alpha * y_pos;
     double persist = resid_ema_.norm();
     double g_span = std::max(1e-6, params.ramp_g_hi_m - params.ramp_g_lo_m);
     double g_t = (persist - params.ramp_g_lo_m) / g_span;

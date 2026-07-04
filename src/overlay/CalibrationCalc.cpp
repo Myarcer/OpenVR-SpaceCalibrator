@@ -131,6 +131,9 @@ CalibrationCalc::~CalibrationCalc() = default;
 
 void CalibrationCalc::SlamFixDriftReset() {
 	if (m_driftFilter) m_driftFilter->Reset();
+	m_slamFixPrevRefValid = false;
+	m_slamFixRefVelLin.setZero();
+	m_slamFixRefVelAng.setZero();
 }
 
 bool CalibrationCalc::SlamFixConsumeResetEvent() {
@@ -683,9 +686,49 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 	const Sample& s = m_samples.back();
 	if (!s.valid) return false;
 
-	// T_meas in world. Same pattern as CalibrateByRelPose() but per-sample.
+	// --- Time-skew compensation ---
+	// The ref (SLAM) pose lags the lighthouse target by ~dt_skew (streaming
+	// latency). Extrapolate ref forward by dt_skew along its finite-difference
+	// velocity so the pair is time-aligned: motion-time measurements become
+	// real drift signal instead of skew artifact, letting the EKF correct
+	// DURING movement (masked by optic flow) rather than after it stops.
+	// The k_skew/k_lever R-inflation gains are reduced to match.
+	Eigen::Matrix4d ref_mat = s.ref.ToAffine();
+	Eigen::Quaterniond q_ref(ref_mat.block<3, 3>(0, 0));
+	q_ref.normalize();
+	Eigen::Vector3d t_ref = ref_mat.block<3, 1>(0, 3);
+
+	if (m_slamFixPrevRefValid && dt > 1e-4 && dt <= 0.1) {
+		Eigen::Vector3d v_lin = (t_ref - m_slamFixPrevRefPos) / dt;
+		Eigen::Quaterniond q_prev = m_slamFixPrevRefRot;
+		if (q_prev.dot(q_ref) < 0.0) q_prev.coeffs() = -q_prev.coeffs();
+		Eigen::Vector3d w_body = Sophus::SO3d(
+			(q_prev.conjugate() * q_ref).normalized()).log() / dt;
+		// Clamp to human-plausible speeds - SLAM teleports must not extrapolate.
+		if (v_lin.norm() > 3.0)  v_lin  *= 3.0 / v_lin.norm();
+		if (w_body.norm() > 6.0) w_body *= 6.0 / w_body.norm();
+		// Same EMA smoothing as the Q velocities in Calibration.cpp.
+		const double VEL_EMA_ALPHA = 0.3;
+		m_slamFixRefVelLin = (1.0 - VEL_EMA_ALPHA) * m_slamFixRefVelLin + VEL_EMA_ALPHA * v_lin;
+		m_slamFixRefVelAng = (1.0 - VEL_EMA_ALPHA) * m_slamFixRefVelAng + VEL_EMA_ALPHA * w_body;
+	} else if (dt > 0.1) {
+		// Gap: stale velocity is meaningless, don't extrapolate on garbage.
+		m_slamFixRefVelLin.setZero();
+		m_slamFixRefVelAng.setZero();
+	}
+	m_slamFixPrevRefPos = t_ref;
+	m_slamFixPrevRefRot = q_ref;
+	m_slamFixPrevRefValid = true;
+
+	const double dt_skew = m_driftFilter ? m_driftFilter->params.dt_skew_s : 0.0;
+	Eigen::AffineCompact3d ref_comp = Eigen::AffineCompact3d::Identity();
+	ref_comp.linear() = (q_ref * Sophus::SO3d::exp(m_slamFixRefVelAng * dt_skew).unit_quaternion()).toRotationMatrix();
+	ref_comp.translation() = t_ref + m_slamFixRefVelLin * dt_skew;
+
+	// T_meas in world. Same pattern as CalibrateByRelPose() but per-sample,
+	// with the skew-compensated ref pose.
 	Eigen::AffineCompact3d Tmeas_aff(
-		s.ref.ToAffine() * m_refToTargetPose * s.target.ToAffine().inverse()
+		ref_comp * m_refToTargetPose * s.target.ToAffine().inverse()
 	);
 
 	// Convert to SE3d via quaternion (handles minor non-orthogonality).
