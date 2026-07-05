@@ -4,7 +4,8 @@
 //   T  in SE(3)  - current ref->target drift transform (manifold)
 //   v  in se(3)  - drift velocity, 6-vector (3 lin, 3 ang) in tangent space
 //
-// Predict (per tick, dt ~10ms @ 100Hz):
+// Predict (per tick; nominal interval 10ms but the overlay main loop runs
+// ~30Hz in practice, so dt is typically ~30ms — use dt/time, never tick counts):
 //   T_pred = T * Exp(v * dt)
 //   v_pred = v
 //   P_pred = F * P * F^T + Q(motion)
@@ -101,7 +102,7 @@ public:
         // subsequent rotation (where R-inflation suppresses real updates).
         double zupt_lin_thresh_mps = 0.05;  // m/s - below this = "not walking"
         double zupt_ang_thresh_radps = 0.1; // rad/s - below this = "not rotating"
-        double zupt_decay_factor = 0.85;    // per-tick multiplier (~15% kill/tick @ 100Hz, ~100ms to near-zero)
+        double zupt_decay_factor = 0.85;    // per-tick multiplier (~15% kill/tick, ~200ms to near-zero @ ~33Hz)
 
         // Rotation freeze (rotation-overcorrection fix). During a head turn the
         // lever-arm R-inflation blinds the position channel, so any residual
@@ -143,7 +144,7 @@ public:
         double k_omega_rot       = 1.0e-3;   // R-inflation gain on omega^2 (rad^2 per (rad/s)^2)
 
         double reset_mahal_thresh = 5.0;
-        int    reset_persist_ticks = 50;     // ~0.5s @ 100Hz
+        int    reset_persist_ticks = 50;     // ~1.5s at the real ~33Hz tick rate
 
         // --- Persistence ramp (anti small-head-bob catch-up) ---
         // The omega R-inflation only suppresses FAST motion; a SLOW small head

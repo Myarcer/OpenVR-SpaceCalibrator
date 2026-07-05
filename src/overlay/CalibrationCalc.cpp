@@ -757,63 +757,10 @@ bool CalibrationCalc::SlamFixDriftStep(double dt,
 
 
 
-bool CalibrationCalc::RefineRMount(double blend_alpha,
-                                   double max_pos_delta_m,
-                                   double max_rot_delta_rad) {
-	if (!m_relativePosCalibrated || !m_isValid) return false;
-	if (m_samples.size() < 20) return false;
-
-	// CRITICAL: Derive R_mount from STATELESS Kabsch, NOT the EKF output.
-	// Using the EKF's m_estimatedTransformation creates a circular lock:
-	// EKF drift → absorbed into R_mount → T_meas confirms drifted state
-	// → innovation drops → drift locked in forever, growing each cycle.
-	//
-	// ComputeCalibration() uses raw sample-pair rotation deltas (Kabsch SVD)
-	// which are independent of both R_mount and EKF state.
-	Eigen::AffineCompact3d kabschCal = ComputeCalibration(true);
-
-	// Validate: need enough rotational variance for Kabsch to be reliable.
-	double axisVar = ComputeAxisVariance(kabschCal)(1);
-	if (axisVar < AxisVarianceThreshold) return false;
-
-	// RMS error check.
-	const auto posOffset = ComputeRefToTargetOffset(kabschCal);
-	double rmsError = RetargetingErrorRMS(posOffset, kabschCal);
-	if (rmsError > 0.1) return false;
-
-	// Derive R_mount from the Kabsch result (independent ground truth).
-	Eigen::AffineCompact3d new_rmount = EstimateRefToTargetPose(kabschCal);
-
-	// Compute delta between current and new R_mount.
-	Eigen::Vector3d pos_delta = new_rmount.translation() - m_refToTargetPose.translation();
-	double pos_delta_m = pos_delta.norm();
-
-	Eigen::Matrix3d rot_delta = m_refToTargetPose.rotation().transpose() * new_rmount.rotation();
-	double rot_trace = std::min(3.0, std::max(-1.0, rot_delta.trace()));
-	double rot_delta_rad = std::acos((rot_trace - 1.0) / 2.0);
-
-	bool is_large = (pos_delta_m > max_pos_delta_m) || (rot_delta_rad > max_rot_delta_rad);
-
-	if (is_large) {
-		m_refToTargetPose = new_rmount;
-	} else {
-		// Translation: lerp.
-		m_refToTargetPose.translation() =
-			(1.0 - blend_alpha) * m_refToTargetPose.translation()
-			+ blend_alpha * new_rmount.translation();
-		// Rotation: SLERP.
-		Eigen::Quaterniond q_old(m_refToTargetPose.rotation());
-		Eigen::Quaterniond q_new(new_rmount.rotation());
-		q_old.normalize();
-		q_new.normalize();
-		if (q_old.dot(q_new) < 0.0) q_new.coeffs() = -q_new.coeffs();
-		Eigen::Quaterniond q_blended = q_old.slerp(blend_alpha, q_new);
-		q_blended.normalize();
-		m_refToTargetPose.linear() = q_blended.toRotationMatrix();
-	}
-
-	return true;
-}
+// RefineRMount DELETED: both attempted implementations were harmful (EKF-based
+// = circular drift lock-in; Kabsch-based = garbage under low rotation variance).
+// R_mount stays frozen from bootstrap; SlamFixKabschRecenter refreshes it from
+// recent samples when a settled recenter is accepted. See Calibration.cpp.
 
 bool CalibrationCalc::SlamFixKabschRecenter(bool ignoreOutliers, double threshold, double* out_axisVariance) {
 	if (out_axisVariance) *out_axisVariance = 0.0;

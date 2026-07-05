@@ -602,7 +602,7 @@ void CalibrationTick(double time)
 		ScanAndApplyProfile(ctx);
 
 		Metrics::jitterRef.Push(calibration.ReferenceJitter());
-		Metrics::jitterRef.Push(calibration.TargetJitter());
+		Metrics::jitterTarget.Push(calibration.TargetJitter());
 
 		if (!CalCtx.ReferencePoseIsValidSimple())
 		{
@@ -733,7 +733,7 @@ void CalibrationTick(double time)
 		if (user_lin_speed_raw > V_LIN_MAX) user_lin_speed_raw = V_LIN_MAX;
 		if (user_ang_speed_raw > V_ANG_MAX) user_ang_speed_raw = V_ANG_MAX;
 
-		// EMA smoothing for Q only. alpha=0.3 -> ~3-tick (30ms) time constant.
+		// EMA smoothing for Q only. alpha=0.3 -> ~3-tick (~90ms @ ~33Hz) time constant.
 		// Single outlier moves EMA by 30% then decays - filter sees a small
 		// transient instead of a giant Q kick.
 		const double VEL_EMA_ALPHA = 0.3;
@@ -777,7 +777,7 @@ void CalibrationTick(double time)
 			ScanAndApplyProfile(ctx);
 			CalCtx.hasAppliedCalibrationResult = true;
 
-			// Auto-save R to profile after 200 stable tracking ticks (~2s).
+			// Auto-save R to profile after 200 stable tracking ticks (~6s @ ~33Hz).
 			// This lets subsequent sessions skip bootstrap entirely.
 			ctx.slamFixTrackingTicks++;
 			if (!ctx.slamFixRLocked && ctx.slamFixTrackingTicks >= 200) {

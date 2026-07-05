@@ -76,9 +76,9 @@ struct CalibrationContext
 	// pose averaging to keep R_mount fresh (prevents frozen mount error from
 	// amplifying into apparent translation during head rotation).
 	int slamFixRMountRefineTicks = 0;
-	// Kabsch recenter: periodic evaluation budget (~1s cadence). Gated purely
-	// by confidence (variance + RMS error + improvement over current EKF state),
-	// not motion speed. Translation-only fallback when rotation is not observable.
+	// Kabsch recenter: periodic evaluation budget (100 ticks ~= 3s at the real
+	// ~33Hz tick rate). Gated by confidence (variance + RMS error + improvement
+	// over current EKF state) AND the settle gate below.
 	int slamFixKabschRecenterTicks = 0;
 	// Settle gate for the Kabsch recenter: timestamp of the last tick with the
 	// HMD in motion. While the user moves, the sample buffer carries

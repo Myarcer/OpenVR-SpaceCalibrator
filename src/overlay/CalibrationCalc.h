@@ -138,17 +138,6 @@ public:
 	// Position-correction persistence ramp g in [0..1] (logging/diagnostic).
 	double SlamFixCorrectionRamp() const;
 
-	// Periodic R_mount refinement. Re-runs pose averaging on a sliding window
-	// of recent samples to update m_refToTargetPose, preventing frozen mount
-	// error from amplifying into apparent translation during head rotation.
-	// Returns true if R_mount was updated.
-	// blend_alpha: low-pass factor for small corrections (0=ignore, 1=snap)
-	// max_pos_delta_m: position threshold - larger delta triggers snap+reset
-	// max_rot_delta_rad: rotation threshold - larger delta triggers snap+reset
-	bool RefineRMount(double blend_alpha = 0.15,
-	                  double max_pos_delta_m = 0.02,
-	                  double max_rot_delta_rad = 0.035);
-
 	// Kabsch recenter for SLAM-Fix. Mirrors FAST's full-Kabsch acceptance logic
 	// in ComputeIncremental exactly: variance gate (skip if low AND declining),
 	// ValidateCalibration (100mm), improvement gate (threshold, caller passes
