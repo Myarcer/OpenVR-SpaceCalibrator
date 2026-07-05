@@ -403,6 +403,7 @@ void StartContinuousCalibration() {
 		CalCtx.slamFixVelAngEma = 0.0;
 		CalCtx.slamFixRMountRefineTicks = 0;
 		CalCtx.slamFixKabschRecenterTicks = 0;
+		CalCtx.slamFixLastMotionTime = 0.0;
 		calibration.SlamFixDriftReset();
 		// SLAM-Fix params are applied at-read-time via Effective*() accessors.
 		// User profile fields are NOT mutated - switching back to FAST/SLOW/etc
@@ -809,9 +810,19 @@ void CalibrationTick(double time)
 		// and 28% improvement requirement (FAST's contThr=1.4). Only fires when the
 		// buffer has enough rotational spread AND the new fit is meaningfully better,
 		// same as FAST.
+		// Settle gate: recenter only after ~1.5s of near-stillness so the
+		// sample buffer is clean of motion artifacts. A recenter fired mid-motion
+		// snaps to a corrupted fit (2026-07-05 log: errCal 20mm -> 166mm after a
+		// recenter at 63 deg/s head speed). Raw clamped speeds, not the EMA - the
+		// gate must close instantly at motion onset.
+		if (user_lin_speed_raw >= 0.08 || user_ang_speed_raw >= 0.15)
+			ctx.slamFixLastMotionTime = time;
+		bool slamFixSettled = (time - ctx.slamFixLastMotionTime) >= 1.5;
+
 		ctx.slamFixKabschRecenterTicks++;
 		double recenterFired = 0.0;
 		if (ctx.slamFixKabschRecenterTicks >= 100
+			&& slamFixSettled
 			&& calibration.SampleCount() >= 50)
 		{
 			ctx.slamFixKabschRecenterTicks = 0;

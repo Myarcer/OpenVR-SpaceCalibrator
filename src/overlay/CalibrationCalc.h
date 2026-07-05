@@ -190,14 +190,13 @@ private:
 
 	std::unique_ptr<DriftFilter> m_driftFilter;
 
-	// SLAM-Fix time-skew compensation: finite-difference velocity of the ref
-	// (SLAM) device, used to extrapolate its pose forward by dt_skew so the
-	// ref/target pair is time-aligned before forming T_meas.
+	// SLAM-Fix time-skew compensation: finite-difference LINEAR velocity of the
+	// ref (SLAM) device, used to extrapolate its position forward by dt_skew so
+	// the ref/target pair is time-aligned before forming T_meas. Rotation is
+	// intentionally not extrapolated (see SlamFixDriftStep).
 	bool m_slamFixPrevRefValid = false;
 	Eigen::Vector3d m_slamFixPrevRefPos = Eigen::Vector3d::Zero();
-	Eigen::Quaterniond m_slamFixPrevRefRot = Eigen::Quaterniond::Identity();
 	Eigen::Vector3d m_slamFixRefVelLin = Eigen::Vector3d::Zero();
-	Eigen::Vector3d m_slamFixRefVelAng = Eigen::Vector3d::Zero();  // body frame
 
 	std::deque<Sample> m_samples;
 

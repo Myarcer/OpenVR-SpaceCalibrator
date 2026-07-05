@@ -118,7 +118,14 @@ public:
                                              // static floor than FAST preset's Kabsch
                                              // (which averages 100-500 samples,
                                              // effectively shrinking sigma by sqrt(N)).
-        double k_lever           = 25.0;     // R-inflation gain on (omega*L)^2
+        // Rotation is POISON for the position channel: T_meas is built from a
+        // chain with meter-scale translations (target world pose), so a SLAM
+        // rotation lag of omega*dt_skew multiplies into 100s of mm of apparent
+        // translation (log 2026-07-05: 813mm innovation at 326 deg/s). These
+        // rotation-driven gains must stay high enough to keep the filter blind
+        // during head rotation; only the LINEAR skew term is compensated and
+        // may run with a low gain.
+        double k_lever           = 100.0;    // R-inflation gain on (omega*L)^2
         // Time-skew between reference (SLAM HMD, ~10-25ms latency typical for
         // Pico/Quest streamed via VirtualDesktop/ALVR) and target (lighthouse,
         // low latency) creates apparent translational error proportional to
@@ -132,7 +139,7 @@ public:
         // Rotation R inflation for residual rotation skew after compensation,
         // plus a per-tick term for raw SLAM rotation jitter that grows during
         // fast rotation (motion blur, feature loss).
-        double k_skew_rot        = 25.0;     // R-inflation gain on (omega*dt_skew)^2 (rad^2)
+        double k_skew_rot        = 100.0;    // R-inflation gain on (omega*dt_skew)^2 (rad^2)
         double k_omega_rot       = 1.0e-3;   // R-inflation gain on omega^2 (rad^2 per (rad/s)^2)
 
         double reset_mahal_thresh = 5.0;
@@ -149,10 +156,11 @@ public:
         // g~0 -> R huge -> no chase, g=1 -> normal gain. Because g reaches 1.0 for
         // genuine net movement, a real 1-2m walk is corrected at FULL strength -
         // the bob suppression never under-corrects real locomotion.
-        double ramp_resid_tau_s     = 0.25;  // EMA time constant on signed residual (dt-normalized)
+        double ramp_resid_tau_s     = 0.30;  // EMA time constant on signed residual (dt-normalized)
         double ramp_g_lo_m          = 0.005; // persistent residual <= this -> g at floor (no chase)
         double ramp_g_hi_m          = 0.030; // persistent residual >= this -> g = 1 (full correction)
-        double ramp_g_floor         = 0.10;  // min g (avoids R blow-up / permanent lockout)
+        double ramp_g_floor         = 0.02;  // min g; 0.10 chased slow sitting bobs (2026-07-05 log),
+                                             // real drift leaves the floor via the EMA knee anyway
         double ramp_tau_up_s        = 0.5;   // max ramp-up time toward full gain
         double ramp_tau_down_s      = 0.4;   // faster collapse when the transient ends
     };

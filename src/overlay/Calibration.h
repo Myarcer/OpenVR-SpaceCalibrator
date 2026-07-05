@@ -80,6 +80,12 @@ struct CalibrationContext
 	// by confidence (variance + RMS error + improvement over current EKF state),
 	// not motion speed. Translation-only fallback when rotation is not observable.
 	int slamFixKabschRecenterTicks = 0;
+	// Settle gate for the Kabsch recenter: timestamp of the last tick with the
+	// HMD in motion. While the user moves, the sample buffer carries
+	// lever-arm/skew artifacts (NOT drift) - a recenter fired mid-motion snaps
+	// to a corrupted fit (2026-07-05 log: errCal 20mm -> 166mm after a recenter
+	// at 63 deg/s head speed). Only recenter after ~1.5s of near-stillness.
+	double slamFixLastMotionTime = 0.0;
 
 
 	float xprev, yprev, zprev;
